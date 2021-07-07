@@ -1,10 +1,12 @@
 use std::collections::{HashMap, HashSet};
+use std::usize;
 
 use super::{Expression, ExpressionType, RegisterProperties, Variable};
 use crate::intermediate_representation::Arg as IrArg;
 use crate::intermediate_representation::Blk as IrBlk;
 use crate::intermediate_representation::ByteSize;
 use crate::intermediate_representation::CallingConvention as IrCallingConvention;
+use crate::intermediate_representation::DatatypeProperties;
 use crate::intermediate_representation::Def as IrDef;
 use crate::intermediate_representation::Expression as IrExpression;
 use crate::intermediate_representation::ExternSymbol as IrExternSymbol;
@@ -134,46 +136,48 @@ pub struct Def {
     pub rhs: Expression,
 }
 
-impl From<Def> for IrDef {
+impl Def {
     /// Convert a P-Code instruction to the internally used IR.
-    fn from(def: Def) -> IrDef {
+    pub fn into_ir_def(self, generic_pointer_size: ByteSize) -> IrDef {
         use super::ExpressionType::*;
-        match def.rhs.mnemonic {
+        match self.rhs.mnemonic {
             LOAD => IrDef::Load {
-                var: def.lhs.unwrap().into(),
-                address: def.rhs.input1.unwrap().into(),
+                var: self.lhs.unwrap().into(),
+                address: self.rhs.input1.unwrap().into(),
             },
             STORE => IrDef::Store {
-                address: def.rhs.input1.unwrap().into(),
-                value: def.rhs.input2.unwrap().into(),
+                address: self.rhs.input1.unwrap().into(),
+                value: self.rhs.input2.unwrap().into(),
             },
             SUBPIECE => IrDef::Assign {
-                var: def.lhs.clone().unwrap().into(),
+                var: self.lhs.clone().unwrap().into(),
                 value: IrExpression::Subpiece {
-                    low_byte: def.rhs.input1.unwrap().parse_to_bytesize(),
-                    size: def.lhs.unwrap().size,
-                    arg: Box::new(def.rhs.input0.unwrap().into()),
+                    low_byte: self.rhs.input1.unwrap().parse_to_bytesize(),
+                    size: self.lhs.unwrap().size,
+                    arg: Box::new(self.rhs.input0.unwrap().into()),
                 },
             },
             INT_ZEXT | INT_SEXT | INT2FLOAT | FLOAT2FLOAT | TRUNC | POPCOUNT => IrDef::Assign {
-                var: def.lhs.clone().unwrap().into(),
+                var: self.lhs.clone().unwrap().into(),
                 value: IrExpression::Cast {
-                    op: def.rhs.mnemonic.into(),
-                    size: def.lhs.unwrap().size,
-                    arg: Box::new(def.rhs.input0.unwrap().into()),
+                    op: self.rhs.mnemonic.into(),
+                    size: self.lhs.unwrap().size,
+                    arg: Box::new(self.rhs.input0.unwrap().into()),
                 },
             },
             _ => {
-                let target_var = def.lhs.unwrap();
+                let target_var = self.lhs.unwrap();
                 if target_var.address.is_some() {
                     IrDef::Store {
-                        address: IrExpression::Const(target_var.parse_to_bitvector()),
-                        value: def.rhs.into(),
+                        address: IrExpression::Const(
+                            target_var.parse_address_to_bitvector(generic_pointer_size),
+                        ),
+                        value: self.rhs.into(),
                     }
                 } else {
                     IrDef::Assign {
                         var: target_var.into(),
-                        value: def.rhs.into(),
+                        value: self.rhs.into(),
                     }
                 }
             }
@@ -190,23 +194,23 @@ pub struct Blk {
     pub jmps: Vec<Term<Jmp>>,
 }
 
-impl From<Blk> for IrBlk {
+impl Blk {
     /// Convert a P-Code block to the internally used IR.
-    fn from(blk: Blk) -> IrBlk {
-        let defs: Vec<Term<IrDef>> = blk
+    pub fn into_ir_blk(self, generic_pointer_size: ByteSize) -> IrBlk {
+        let defs: Vec<Term<IrDef>> = self
             .defs
             .into_iter()
             .map(|def_term| Term {
                 tid: def_term.tid,
-                term: def_term.term.into(),
+                term: def_term.term.into_ir_def(generic_pointer_size),
             })
             .collect();
-        let indirect_jmp_targets = blk
+        let indirect_jmp_targets = self
             .jmps
             .iter()
             .find_map(|jmp_term| jmp_term.term.target_hints.clone())
             .unwrap_or_default();
-        let jmps: Vec<Term<IrJmp>> = blk
+        let jmps: Vec<Term<IrJmp>> = self
             .jmps
             .into_iter()
             .map(|jmp_term| Term {
@@ -327,42 +331,42 @@ pub struct Sub {
     pub blocks: Vec<Term<Blk>>,
 }
 
-impl From<Term<Sub>> for Term<IrSub> {
+impl Term<Sub> {
     /// Convert a `Sub` term in the P-Code representation to a `Sub` term in the intermediate representation.
     /// The conversion also repairs the order of the basic blocks in the `blocks` array of the `Sub`
     /// in the sense that the first block of the array is required to also be the function entry point
     /// after the conversion.
-    fn from(mut sub: Term<Sub>) -> Term<IrSub> {
+    pub fn into_ir_sub_term(mut self, generic_pointer_size: ByteSize) -> Term<IrSub> {
         // Since the intermediate representation expects that the first block of a function is its entry point,
         // we have to make sure that this actually holds.
-        if !sub.term.blocks.is_empty() && sub.tid.address != sub.term.blocks[0].tid.address {
+        if !self.term.blocks.is_empty() && self.tid.address != self.term.blocks[0].tid.address {
             let mut start_block_index = None;
-            for (i, block) in sub.term.blocks.iter().enumerate() {
-                if block.tid.address == sub.tid.address {
+            for (i, block) in self.term.blocks.iter().enumerate() {
+                if block.tid.address == self.tid.address {
                     start_block_index = Some(i);
                     break;
                 }
             }
             if let Some(start_block_index) = start_block_index {
-                sub.term.blocks.swap(0, start_block_index);
+                self.term.blocks.swap(0, start_block_index);
             } else {
-                panic!("Non-empty function without correct starting block encountered. Name: {}, TID: {}", sub.term.name, sub.tid);
+                panic!("Non-empty function without correct starting block encountered. Name: {}, TID: {}", self.term.name, self.tid);
             }
         }
 
-        let blocks = sub
+        let blocks = self
             .term
             .blocks
             .into_iter()
             .map(|block_term| Term {
                 tid: block_term.tid,
-                term: block_term.term.into(),
+                term: block_term.term.into_ir_blk(generic_pointer_size),
             })
             .collect();
         Term {
-            tid: sub.tid,
+            tid: self.tid,
             term: IrSub {
-                name: sub.term.name,
+                name: self.term.name,
                 blocks,
             },
         }
@@ -385,17 +389,146 @@ pub struct ExternSymbol {
     pub arguments: Vec<Arg>,
     /// If the function is assumed to never return to the caller, this flag is set to `true`.
     pub no_return: bool,
+    /// If the function has a variable number of parameters, this flag is set to `true`.
+    pub has_var_args: bool,
 }
 
-impl From<ExternSymbol> for IrExternSymbol {
+impl ExternSymbol {
+    /// Artificially creates format string arguments as they are not detected by Ghidra.
+    /// For scanf calls, the format string parameter is added to the function signature.
+    /// For sscanf calls, the source and format string parameters are added to the function signature.
+    fn create_format_string_args_for_scanf_and_sscanf(
+        &mut self,
+        conventions: &[CallingConvention],
+        stack_pointer: &Variable,
+        cpu_arch: &str,
+    ) {
+        let mut args: Vec<Arg> = Vec::new();
+        if cpu_arch == "x86_32" {
+            args.push(ExternSymbol::create_stack_arg(stack_pointer, 0));
+            if self.name == "sscanf" || self.name == "__isoc99_sscanf" {
+                args.push(ExternSymbol::create_stack_arg(
+                    stack_pointer,
+                    stack_pointer.size.as_bit_length(),
+                ));
+            }
+        } else {
+            args.push(self.create_register_arg(0, conventions, stack_pointer));
+            if self.name == "sscanf" || self.name == "__isoc99_sscanf" {
+                args.push(self.create_register_arg(1, conventions, stack_pointer));
+            }
+        }
+
+        self.arguments.append(&mut args);
+    }
+
+    /// Matches the symbol's calling convention name and returns the desired integer parameter by index.
+    fn get_symbol_parameter_by_index(
+        &self,
+        conventions: &[CallingConvention],
+        index: usize,
+    ) -> Option<String> {
+        if let Some(cconv) = self.calling_convention.clone() {
+            for convention in conventions.iter() {
+                if convention.name == cconv {
+                    return Some(
+                        convention
+                            .integer_parameter_register
+                            .get(index)
+                            .unwrap()
+                            .clone(),
+                    );
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Creates a stack argument for scanf or sscanf calls.
+    /// The address differs for both calls since the format string parameter is
+    /// at a different position.
+    fn create_stack_arg(stack_pointer: &Variable, address: usize) -> Arg {
+        Arg {
+            var: None,
+            location: Some(Expression {
+                mnemonic: ExpressionType::LOAD,
+                input0: Some(Variable {
+                    name: None,
+                    value: None,
+                    address: Some(format!(
+                        "{:0width$x}",
+                        address,
+                        width = stack_pointer.size.as_bit_length()
+                    )),
+                    size: stack_pointer.size,
+                    is_virtual: false,
+                }),
+                input1: None,
+                input2: None,
+            }),
+            intent: ArgIntent::INPUT,
+        }
+    }
+
+    /// Creates a register argument for scanf and sscanf calls.
+    /// The format string index is different for each call.
+    fn create_register_arg(
+        &self,
+        index: usize,
+        conventions: &[CallingConvention],
+        stack_pointer: &Variable,
+    ) -> Arg {
+        Arg {
+            var: Some(Variable {
+                name: self.get_symbol_parameter_by_index(conventions, index),
+                value: None,
+                address: None,
+                size: stack_pointer.size,
+                is_virtual: false,
+            }),
+            location: None,
+            intent: ArgIntent::INPUT,
+        }
+    }
+
+    /// Matches the symbols name with either scanf or sscanf.
+    fn is_scanf_or_sscanf(&self) -> bool {
+        matches!(
+            self.name.as_str(),
+            "scanf" | "sscanf" | "__isoc99_scanf" | "__isoc99_sscanf"
+        )
+    }
+
     /// Convert an extern symbol parsed from Ghidra to the internally used IR.
-    fn from(symbol: ExternSymbol) -> IrExternSymbol {
+    fn into_ir_symbol(
+        self,
+        conventions: &[CallingConvention],
+        stack_pointer: &Variable,
+        cpu_arch: &str,
+    ) -> IrExternSymbol {
+        let mut symbol = self.clone();
         let mut parameters = Vec::new();
         let mut return_values = Vec::new();
-        for arg in symbol.arguments {
-            let ir_arg = if let Some(var) = arg.var {
-                IrArg::Register(var.into())
-            } else if let Some(expr) = arg.location {
+        let input_args: Vec<&Arg> = symbol
+            .arguments
+            .iter()
+            .filter(|arg| matches!(arg.intent, ArgIntent::INPUT))
+            .collect();
+        if symbol.is_scanf_or_sscanf() && input_args.is_empty() {
+            symbol.create_format_string_args_for_scanf_and_sscanf(
+                conventions,
+                stack_pointer,
+                cpu_arch,
+            );
+        }
+        for arg in symbol.arguments.iter() {
+            let ir_arg = if let Some(var) = arg.var.clone() {
+                IrArg::Register {
+                    var: var.into(),
+                    data_type: None,
+                }
+            } else if let Some(expr) = arg.location.clone() {
                 if expr.mnemonic == ExpressionType::LOAD {
                     IrArg::Stack {
                         offset: i64::from_str_radix(
@@ -409,6 +542,7 @@ impl From<ExternSymbol> for IrExternSymbol {
                         )
                         .unwrap(),
                         size: expr.input0.unwrap().size,
+                        data_type: None,
                     }
                 } else {
                     panic!()
@@ -422,13 +556,14 @@ impl From<ExternSymbol> for IrExternSymbol {
             }
         }
         IrExternSymbol {
-            tid: symbol.tid,
-            addresses: symbol.addresses,
-            name: symbol.name,
-            calling_convention: symbol.calling_convention,
+            tid: self.tid,
+            addresses: self.addresses,
+            name: self.name,
+            calling_convention: self.calling_convention,
             parameters,
             return_values,
-            no_return: symbol.no_return,
+            no_return: self.no_return,
+            has_var_args: self.has_var_args,
         }
     }
 }
@@ -457,12 +592,22 @@ impl Program {
     /// It is needed to detect whether Ghidra added a constant offset to all addresses of the memory address.
     /// E.g. if the `binary_base_address` is 0 for shared object files,
     /// Ghidra adds an offset so that the memory image does not actually start at address 0.
-    pub fn into_ir_program(self, binary_base_address: u64) -> IrProgram {
-        let subs = self.subs.into_iter().map(|sub| sub.into()).collect();
+    pub fn into_ir_program(
+        self,
+        binary_base_address: u64,
+        conventions: &[CallingConvention],
+        stack_pointer: &Variable,
+        cpu_arch: &str,
+    ) -> IrProgram {
+        let subs = self
+            .subs
+            .into_iter()
+            .map(|sub| sub.into_ir_sub_term(stack_pointer.size))
+            .collect();
         let extern_symbols = self
             .extern_symbols
             .into_iter()
-            .map(|symbol| symbol.into())
+            .map(|symbol| symbol.into_ir_symbol(conventions, stack_pointer, cpu_arch))
             .collect();
         let address_base_offset =
             u64::from_str_radix(&self.image_base, 16).unwrap() - binary_base_address;
@@ -481,8 +626,10 @@ pub struct CallingConvention {
     /// The name of the calling convention.
     #[serde(rename = "calling_convention")]
     pub name: String,
-    /// Possible parameter registers.
-    parameter_register: Vec<String>,
+    /// Possible integer parameter registers.
+    integer_parameter_register: Vec<String>,
+    /// Possible float parameter registers.
+    float_parameter_register: Vec<String>,
     /// Possible return registers.
     return_register: Vec<String>,
     /// Callee-saved registers.
@@ -495,7 +642,8 @@ impl From<CallingConvention> for IrCallingConvention {
     fn from(cconv: CallingConvention) -> IrCallingConvention {
         IrCallingConvention {
             name: cconv.name,
-            parameter_register: cconv.parameter_register,
+            integer_parameter_register: cconv.integer_parameter_register,
+            float_parameter_register: cconv.float_parameter_register,
             return_register: cconv.return_register,
             callee_saved_register: cconv.unaffected_register,
         }
@@ -515,6 +663,8 @@ pub struct Project {
     pub register_properties: Vec<RegisterProperties>,
     /// Information about known calling conventions for the given CPU architecture.
     pub register_calling_convention: Vec<CallingConvention>,
+    /// Contains the properties of C data types. (e.g. size)
+    pub datatype_properties: DatatypeProperties,
 }
 
 impl Project {
@@ -525,7 +675,12 @@ impl Project {
     pub fn into_ir_project(self, binary_base_address: u64) -> IrProject {
         let mut program: Term<IrProgram> = Term {
             tid: self.program.tid,
-            term: self.program.term.into_ir_program(binary_base_address),
+            term: self.program.term.into_ir_program(
+                binary_base_address,
+                &self.register_calling_convention,
+                &self.stack_pointer_register,
+                &self.cpu_architecture,
+            ),
         };
         let register_map: HashMap<&String, &RegisterProperties> = self
             .register_properties
@@ -620,15 +775,29 @@ impl Project {
                 });
             }
         }
+        let register_list = self
+            .register_properties
+            .iter()
+            .filter_map(|reg| {
+                if reg.register == reg.base_register {
+                    Some(reg.into())
+                } else {
+                    None
+                }
+            })
+            .collect();
         IrProject {
             program,
             cpu_architecture: self.cpu_architecture,
             stack_pointer_register: self.stack_pointer_register.into(),
             calling_conventions: self
                 .register_calling_convention
+                .clone()
                 .into_iter()
                 .map(|cconv| cconv.into())
                 .collect(),
+            register_list,
+            datatype_properties: self.datatype_properties.clone(),
         }
     }
 }
@@ -669,12 +838,11 @@ impl Project {
         for sub in self.program.term.subs.iter_mut() {
             if !sub.term.blocks.is_empty()
                 && sub.tid.address != sub.term.blocks[0].tid.address
-                && sub
+                && !sub
                     .term
                     .blocks
                     .iter()
-                    .find(|block| block.tid.address == sub.tid.address)
-                    .is_none()
+                    .any(|block| block.tid.address == sub.tid.address)
             {
                 log_messages.push(LogMessage::new_error(format!(
                     "Starting block of function {} ({}) not found.",

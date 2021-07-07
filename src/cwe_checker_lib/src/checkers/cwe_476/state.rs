@@ -92,12 +92,12 @@ impl State {
         };
         for return_arg in taint_source.return_values.iter() {
             match return_arg {
-                Arg::Register(var) => {
+                Arg::Register { var, .. } => {
                     state
                         .register_taint
                         .insert(var.clone(), Taint::Tainted(var.size));
                 }
-                Arg::Stack { offset, size } => {
+                Arg::Stack { offset, size, .. } => {
                     if let Some(pi_state) = pi_state {
                         let address_exp =
                             Expression::Var(stack_pointer_register.clone()).plus_const(*offset);
@@ -297,10 +297,9 @@ impl State {
         pi_state_option: Option<&PointerInferenceState>,
     ) -> bool {
         if let Some(calling_conv) = project.get_standard_calling_convention() {
-            self.check_register_list_for_taint(
-                &calling_conv.parameter_register[..],
-                pi_state_option,
-            )
+            let mut all_parameters = calling_conv.integer_parameter_register.clone();
+            all_parameters.append(&mut calling_conv.float_parameter_register.clone());
+            self.check_register_list_for_taint(&all_parameters, pi_state_option)
         } else {
             // No standard calling convention found. Assume everything may be parameters or referenced by parameters.
             !self.is_empty()
@@ -396,10 +395,14 @@ mod tests {
         }
 
         pub fn mock_with_pi_state() -> (State, PointerInferenceState) {
-            let arg1 = Arg::Register(register("RAX"));
+            let arg1 = Arg::Register {
+                var: register("RAX"),
+                data_type: None,
+            };
             let arg2 = Arg::Stack {
                 offset: 0,
                 size: ByteSize::new(8),
+                data_type: None,
             };
             let pi_state = PointerInferenceState::new(&register("RSP"), Tid::new("func"));
             let symbol = ExternSymbol {
@@ -410,6 +413,7 @@ mod tests {
                 parameters: Vec::new(),
                 return_values: vec![arg1, arg2],
                 no_return: false,
+                has_var_args: false,
             };
             let state = State::new(&symbol, &register("RSP"), Some(&pi_state));
             (state, pi_state)

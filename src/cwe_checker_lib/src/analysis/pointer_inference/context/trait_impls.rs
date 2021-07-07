@@ -1,5 +1,4 @@
 use super::*;
-use std::collections::HashSet;
 
 impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Context<'a> {
     type Value = State;
@@ -16,8 +15,9 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
 
     /// Update the state according to the effects of the given `Def` term.
     fn update_def(&self, state: &Self::Value, def: &Term<Def>) -> Option<Self::Value> {
+        let mut new_state = state.clone();
         // first check for use-after-frees
-        if state.contains_access_of_dangling_memory(&def.term) {
+        if new_state.contains_access_of_dangling_memory(&def.term) {
             let warning = CweWarning {
                 name: "CWE416".to_string(),
                 version: VERSION.to_string(),
@@ -32,10 +32,39 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
             };
             let _ = self.log_collector.send(LogThreadMsg::Cwe(warning));
         }
+        // check for out-of-bounds memory access
+        if state.contains_out_of_bounds_mem_access(&def.term, self.runtime_memory_image) {
+            let (warning_name, warning_description) = match def.term {
+                Def::Load { .. } => (
+                    "CWE125",
+                    format!(
+                        "(Out-of-bounds Read) Memory load at {} may be out of bounds",
+                        def.tid.address
+                    ),
+                ),
+                Def::Store { .. } => (
+                    "CWE787",
+                    format!(
+                        "(Out-of-bounds Write) Memory write at {} may be out of bounds",
+                        def.tid.address
+                    ),
+                ),
+                Def::Assign { .. } => panic!(),
+            };
+            let warning = CweWarning {
+                name: warning_name.to_string(),
+                version: VERSION.to_string(),
+                addresses: vec![def.tid.address.clone()],
+                tids: vec![format!("{}", def.tid)],
+                symbols: Vec::new(),
+                other: Vec::new(),
+                description: warning_description,
+            };
+            let _ = self.log_collector.send(LogThreadMsg::Cwe(warning));
+        }
 
         match &def.term {
             Def::Store { address, value } => {
-                let mut new_state = state.clone();
                 self.log_debug(
                     new_state.handle_store(address, value, self.runtime_memory_image),
                     Some(&def.tid),
@@ -43,12 +72,10 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
                 Some(new_state)
             }
             Def::Assign { var, value } => {
-                let mut new_state = state.clone();
                 new_state.handle_register_assign(var, value);
                 Some(new_state)
             }
             Def::Load { var, address } => {
-                let mut new_state = state.clone();
                 self.log_debug(
                     new_state.handle_load(var, address, &self.runtime_memory_image),
                     Some(&def.tid),
@@ -59,8 +86,7 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
     }
 
     /// Update the state according to the effects of the given `Jmp` term.
-    /// Right now the state is not changed,
-    /// as specialization for conditional jumps is not implemented yet.
+    /// Right now the state is not changed.
     fn update_jump(
         &self,
         value: &State,
@@ -106,8 +132,14 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
                 // Note that this may lead to analysis errors if the function uses another calling convention.
                 callee_state.remove_callee_saved_register(cconv);
             }
+
+            // Set the lower index bound for the caller stack frame.
+            callee_state
+                .memory
+                .set_lower_index_bound(&state.stack_id, &stack_offset_adjustment);
             // Replace the caller stack ID with one determined by the call instruction.
-            // This has to be done *before* adding the new callee stack id to avoid confusing caller and callee stack ids in case of recursive calls.
+            // This has to be done *before* adding the new callee stack id
+            // to avoid confusing caller and callee stack ids in case of recursive calls.
             callee_state.replace_abstract_id(
                 &state.stack_id,
                 &new_caller_stack_id,
@@ -245,6 +277,12 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
         // remove non-referenced objects from the state
         state_after_return.remove_unreferenced_objects();
 
+        // remove the lower index bound of the stack frame
+        state_after_return.memory.set_lower_index_bound(
+            original_caller_stack_id,
+            &IntervalDomain::new_top(self.project.stack_pointer_register.size),
+        );
+
         Some(state_after_return)
     }
 
@@ -265,17 +303,30 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
         };
         let mut new_state = state.clone();
         if let Some(extern_symbol) = self.extern_symbol_map.get(call_target) {
+            // Generate a CWE-message if some argument is an out-of-bounds pointer.
+            self.check_parameter_register_for_out_of_bounds_pointer(state, call, extern_symbol);
+            // Check parameter for possible use-after-frees (except for possible double frees, which are handled later)
+            if !self
+                .deallocation_symbols
+                .iter()
+                .any(|free_like_fn| free_like_fn == extern_symbol.name.as_str())
+            {
+                self.check_parameter_register_for_dangling_pointer(
+                    &mut new_state,
+                    call,
+                    extern_symbol,
+                );
+            }
             // Clear non-callee-saved registers from the state.
             let cconv = extern_symbol.get_calling_convention(&self.project);
             new_state.clear_non_callee_saved_register(&cconv.callee_saved_register[..]);
             // Adjust stack register value (for x86 architecture).
             self.adjust_stack_register_on_extern_call(state, &mut new_state);
-            // Check parameter for possible use-after-frees
-            self.check_parameter_register_for_dangling_pointer(state, call, extern_symbol);
 
             match extern_symbol.name.as_str() {
                 malloc_like_fn if self.allocation_symbols.iter().any(|x| x == malloc_like_fn) => {
                     Some(self.add_new_object_in_call_return_register(
+                        state,
                         new_state,
                         call,
                         extern_symbol,
@@ -294,52 +345,18 @@ impl<'a> crate::analysis::forward_interprocedural_fixpoint::Context<'a> for Cont
     /// Update the state with the knowledge that some conditional evaluated to true or false.
     fn specialize_conditional(
         &self,
-        value: &State,
+        state: &State,
         condition: &Expression,
-        block_before_condition: &Term<Blk>,
+        _block_before_condition: &Term<Blk>,
         is_true: bool,
     ) -> Option<State> {
-        let mut specialized_state = value.clone();
+        let mut specialized_state = state.clone();
         if specialized_state
             .specialize_by_expression_result(condition, Bitvector::from_u8(is_true as u8).into())
             .is_err()
         {
             // State is unsatisfiable
             return None;
-        }
-        let mut modified_vars: HashSet<Variable> = HashSet::new();
-        for def in block_before_condition.term.defs.iter().rev() {
-            match &def.term {
-                Def::Store { .. } => (),
-                Def::Load { var, .. } => {
-                    modified_vars.insert(var.clone());
-                }
-                Def::Assign {
-                    var,
-                    value: input_expr,
-                } => {
-                    if !modified_vars.contains(var) {
-                        // Register is not modified again between the `Def` and the end of the block.
-                        modified_vars.insert(var.clone());
-                        if input_expr
-                            .input_vars()
-                            .into_iter()
-                            .find(|input_var| modified_vars.contains(input_var))
-                            .is_none()
-                        {
-                            // Values of input registers did not change between the `Def` and the end of the block.
-                            let expr_result = specialized_state.get_register(var);
-                            if specialized_state
-                                .specialize_by_expression_result(input_expr, expr_result.clone())
-                                .is_err()
-                            {
-                                // State is unsatisfiable
-                                return None;
-                            }
-                        }
-                    }
-                }
-            }
         }
         Some(specialized_state)
     }

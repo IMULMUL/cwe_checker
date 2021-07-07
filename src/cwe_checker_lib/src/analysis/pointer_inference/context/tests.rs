@@ -1,3 +1,5 @@
+use crate::intermediate_representation::DatatypeProperties;
+
 use super::*;
 use std::collections::HashSet;
 
@@ -13,7 +15,10 @@ fn new_id(time: &str, reg_name: &str) -> AbstractIdentifier {
 }
 
 fn mock_extern_symbol(name: &str) -> ExternSymbol {
-    let arg = Arg::Register(register("RDX"));
+    let arg = Arg::Register {
+        var: register("RDX"),
+        data_type: None,
+    };
     ExternSymbol {
         tid: Tid::new("extern_".to_string() + name),
         addresses: vec![],
@@ -22,6 +27,7 @@ fn mock_extern_symbol(name: &str) -> ExternSymbol {
         parameters: vec![arg.clone()],
         return_values: vec![arg],
         no_return: false,
+        has_var_args: false,
     }
 }
 
@@ -81,16 +87,23 @@ fn mock_project() -> (Project, Config) {
     };
     let cconv = CallingConvention {
         name: "default".to_string(),
-        parameter_register: vec!["RDX".to_string()],
+        integer_parameter_register: vec!["RDX".to_string()],
+        float_parameter_register: vec!["XMM0".to_string()],
         return_register: vec!["RDX".to_string()],
         callee_saved_register: vec!["callee_saved_reg".to_string()],
     };
+    let register_list = vec!["RAX", "RCX", "RDX", "RBX", "RSP", "RBP", "RSI", "RDI"]
+        .into_iter()
+        .map(|name| Variable::mock(name, ByteSize::new(8)))
+        .collect();
     (
         Project {
             program: program_term,
             cpu_architecture: "x86_64".to_string(),
             stack_pointer_register: register("RSP"),
             calling_conventions: vec![cconv],
+            register_list,
+            datatype_properties: DatatypeProperties::mock(),
         },
         Config {
             allocation_symbols: vec!["malloc".into()],
@@ -385,97 +398,28 @@ fn specialize_conditional() {
     let mut state = State::new(&register("RSP"), Tid::new("func"));
     state.set_register(&register("RAX"), IntervalDomain::mock(-10, 20).into());
 
-    let condition = Expression::Var(Variable::mock("FLAG", 1));
-
-    // A complicated way of computing the result of `RAX <= 0`
-    // and assigning the result to the `FLAG` register.
-    let defs = vec![
-        Def::assign("def1", register("RAX"), Expression::Var(register("RAX"))),
-        Def::assign(
-            "def_that_should_be_ignored",
-            Variable::mock("FLAG", 1),
-            Expression::Const(Bitvector::from_u8(42)),
-        ),
-        Def::assign(
-            "def2",
-            Variable::mock("FLAG_SLESS", 1),
-            Expression::BinOp {
-                lhs: Box::new(Expression::Var(register("RAX"))),
-                op: BinOpType::IntSLess,
-                rhs: Box::new(Expression::Const(Bitvector::from_u64(0))),
-            },
-        ),
-        Def::assign(
-            "def3",
-            Variable::mock("FLAG_EQUAL", 1),
-            Expression::BinOp {
-                lhs: Box::new(Expression::Var(register("RAX"))),
-                op: BinOpType::IntEqual,
-                rhs: Box::new(Expression::Const(Bitvector::from_u64(0))),
-            },
-        ),
-        Def::assign(
-            "def4",
-            Variable::mock("FLAG_NOTEQUAL", 1),
-            Expression::BinOp {
-                lhs: Box::new(Expression::Var(Variable::mock("FLAG_SLESS", 1))),
-                op: BinOpType::IntNotEqual,
-                rhs: Box::new(Expression::Const(Bitvector::from_u8(0))),
-            },
-        ),
-        Def::assign(
-            "def5",
-            Variable::mock("FLAG", 1),
-            Expression::BinOp {
-                lhs: Box::new(Expression::Var(Variable::mock("FLAG_EQUAL", 1))),
-                op: BinOpType::BoolOr,
-                rhs: Box::new(Expression::Var(Variable::mock("FLAG_NOTEQUAL", 1))),
-            },
-        ),
-    ];
-
-    let block = Term {
-        tid: Tid::new("block"),
-        term: Blk {
-            defs,
-            jmps: Vec::new(),
-            indirect_jmp_targets: Vec::new(),
-        },
+    let condition = Expression::BinOp {
+        lhs: Box::new(Expression::Var(register("RAX"))),
+        op: BinOpType::IntSLessEqual,
+        rhs: Box::new(Expression::Const(Bitvector::zero(ByteSize::new(8).into()))),
     };
+    let block = Blk::mock();
 
     let result = context
         .specialize_conditional(&state, &condition, &block, false)
         .unwrap();
     assert_eq!(
-        result.get_register(&Variable::mock("FLAG", 1)),
-        Bitvector::from_u8(0).into()
-    );
-    assert_eq!(
-        result.get_register(&Variable::mock("FLAG_NOTEQUAL", 1)),
-        Bitvector::from_u8(0).into()
-    );
-    assert_eq!(
-        result.get_register(&Variable::mock("FLAG_EQUAL", 1)),
-        Bitvector::from_u8(0).into()
-    );
-    assert_eq!(
-        result.get_register(&Variable::mock("FLAG_SLESS", 1)),
-        Bitvector::from_u8(0).into()
-    );
-    // The result is technically false, since RAX == 0 should be excluded.
-    // This impreciseness is due to the way that the result is calculated.
-    assert_eq!(
         result.get_register(&register("RAX")),
-        IntervalDomain::mock(0, 20).into()
+        IntervalDomain::mock(1, 20).into()
     );
 
     state.set_register(&register("RAX"), IntervalDomain::mock(0, 20).into());
     let result = context
-        .specialize_conditional(&state, &condition, &block, false)
+        .specialize_conditional(&state, &condition, &block, true)
         .unwrap();
     assert_eq!(
         result.get_register(&register("RAX")),
-        IntervalDomain::mock_with_bounds(Some(0), 1, 20, None).into()
+        IntervalDomain::mock_with_bounds(None, 0, 0, None).into()
     );
 
     state.set_register(&register("RAX"), IntervalDomain::mock(-20, 0).into());

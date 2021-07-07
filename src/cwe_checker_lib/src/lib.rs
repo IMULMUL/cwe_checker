@@ -66,7 +66,7 @@ mod prelude {
     pub use apint::Width;
     pub use serde::{Deserialize, Serialize};
 
-    pub use crate::intermediate_representation::{Bitvector, ByteSize};
+    pub use crate::intermediate_representation::{Bitvector, BitvectorExtended, ByteSize};
     pub use crate::intermediate_representation::{Term, Tid};
     pub use crate::AnalysisResults;
     pub use anyhow::{anyhow, Error};
@@ -99,6 +99,7 @@ impl std::fmt::Display for CweModule {
 pub fn get_modules() -> Vec<&'static CweModule> {
     vec![
         &crate::checkers::cwe_78::CWE_MODULE,
+        &crate::checkers::cwe_134::CWE_MODULE,
         &crate::checkers::cwe_190::CWE_MODULE,
         &crate::checkers::cwe_215::CWE_MODULE,
         &crate::checkers::cwe_243::CWE_MODULE,

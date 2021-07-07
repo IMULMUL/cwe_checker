@@ -44,11 +44,19 @@ pub struct AbstractObjectInfo {
     /// Tracks whether this may represent more than one actual memory object.
     pub is_unique: bool,
     /// Is the object alive or already destroyed
-    state: Option<ObjectState>,
+    state: ObjectState,
     /// Is the object a stack frame or a heap object
     type_: Option<ObjectType>,
     /// The actual content of the memory object
     memory: MemRegion<Data>,
+    /// The smallest index still contained in the memory region.
+    /// A `Top` value represents an unknown bound.
+    /// The bound is not enforced, i.e. reading and writing to indices violating the bound is still allowed.
+    lower_index_bound: BitvectorDomain,
+    /// The largest index still contained in the memory region.
+    /// A `Top` value represents an unknown bound.
+    /// The bound is not enforced, i.e. reading and writing to indices violating the bound is still allowed.
+    upper_index_bound: BitvectorDomain,
 }
 
 impl AbstractObjectInfo {
@@ -57,9 +65,59 @@ impl AbstractObjectInfo {
         AbstractObjectInfo {
             pointer_targets: BTreeSet::new(),
             is_unique: true,
-            state: Some(ObjectState::Alive),
+            state: ObjectState::Alive,
             type_: Some(type_),
             memory: MemRegion::new(address_bytesize),
+            lower_index_bound: BitvectorDomain::Top(address_bytesize),
+            upper_index_bound: BitvectorDomain::Top(address_bytesize),
+        }
+    }
+
+    /// Set the lower index bound that is still considered to be contained in the abstract object.
+    pub fn set_lower_index_bound(&mut self, lower_bound: BitvectorDomain) {
+        self.lower_index_bound = lower_bound;
+    }
+
+    /// Set the upper index bound that is still considered to be contained in the abstract object.
+    pub fn set_upper_index_bound(&mut self, upper_bound: BitvectorDomain) {
+        self.upper_index_bound = upper_bound;
+    }
+
+    /// Check whether a memory access to the abstract object at the given offset
+    /// and with the given size of the accessed value is contained in the bounds of the memory object.
+    /// If `offset` contains more than one possible index value,
+    /// then only return `true` if the access is contained in the abstract object for all possible offset values.
+    pub fn access_contained_in_bounds(&self, offset: &ValueDomain, size: ByteSize) -> bool {
+        if let Ok(offset_interval) = offset.try_to_interval() {
+            if let Ok(lower_bound) = self.lower_index_bound.try_to_bitvec() {
+                if lower_bound.checked_sgt(&offset_interval.start).unwrap() {
+                    return false;
+                }
+            }
+            if let Ok(upper_bound) = self.upper_index_bound.try_to_bitvec() {
+                let mut size_as_bitvec = Bitvector::from_u64(u64::from(size));
+                match offset.bytesize().cmp(&size_as_bitvec.bytesize()) {
+                    std::cmp::Ordering::Less => size_as_bitvec.truncate(offset.bytesize()).unwrap(),
+                    std::cmp::Ordering::Greater => {
+                        size_as_bitvec.sign_extend(offset.bytesize()).unwrap()
+                    }
+                    std::cmp::Ordering::Equal => (),
+                }
+                let max_index = if let Some(val) = offset_interval
+                    .end
+                    .signed_add_overflow_checked(&size_as_bitvec)
+                {
+                    val - &Bitvector::one(offset.bytesize().into())
+                } else {
+                    return false; // The max index already causes an integer overflow
+                };
+                if upper_bound.checked_slt(&max_index).unwrap() {
+                    return false;
+                }
+            }
+            true
+        } else {
+            false
         }
     }
 
@@ -150,12 +208,12 @@ impl AbstractObjectInfo {
     }
 
     /// If `self.is_unique==true`, set the state of the object. Else merge the new state with the old.
-    pub fn set_state(&mut self, new_state: Option<ObjectState>) {
+    pub fn set_state(&mut self, new_state: ObjectState) {
         if self.is_unique {
             self.state = new_state;
-        } else if self.state != new_state {
-            self.state = None;
-        } // else don't change the state
+        } else {
+            self.state = self.state.merge(new_state);
+        }
     }
 
     /// Remove the provided IDs from the target lists of all pointers in the memory object.
@@ -173,7 +231,7 @@ impl AbstractObjectInfo {
     }
 
     /// Get the state of the memory object.
-    pub fn get_state(&self) -> Option<ObjectState> {
+    pub fn get_state(&self) -> ObjectState {
         self.state
     }
 
@@ -196,20 +254,24 @@ impl AbstractObjectInfo {
     /// or the memory object may not be a heap object.
     pub fn mark_as_freed(&mut self) -> Result<(), Error> {
         if self.type_ != Some(ObjectType::Heap) {
-            self.set_state(Some(ObjectState::Dangling));
+            self.set_state(ObjectState::Flagged);
             return Err(anyhow!("Free operation on possibly non-heap memory object"));
         }
         match (self.is_unique, self.state) {
-            (true, Some(ObjectState::Alive)) => {
-                self.state = Some(ObjectState::Dangling);
+            (true, ObjectState::Alive) | (true, ObjectState::Flagged) => {
+                self.state = ObjectState::Dangling;
                 Ok(())
             }
-            (true, _) | (false, Some(ObjectState::Dangling)) => {
-                self.state = Some(ObjectState::Dangling);
+            (false, ObjectState::Flagged) => {
+                self.state = ObjectState::Unknown;
+                Ok(())
+            }
+            (true, _) | (false, ObjectState::Dangling) => {
+                self.state = ObjectState::Flagged;
                 Err(anyhow!("Object may already have been freed"))
             }
             (false, _) => {
-                self.state = None;
+                self.state = ObjectState::Unknown;
                 Ok(())
             }
         }
@@ -220,14 +282,18 @@ impl AbstractObjectInfo {
     /// or if the object may not be a heap object.
     pub fn mark_as_maybe_freed(&mut self) -> Result<(), Error> {
         if self.type_ != Some(ObjectType::Heap) {
-            self.set_state(Some(ObjectState::Dangling));
+            self.set_state(ObjectState::Flagged);
             return Err(anyhow!("Free operation on possibly non-heap memory object"));
         }
-        if self.state != Some(ObjectState::Dangling) {
-            self.state = None;
-            Ok(())
-        } else {
-            Err(anyhow!("Object may already have been freed"))
+        match self.state {
+            ObjectState::Dangling => {
+                self.state = ObjectState::Flagged;
+                Err(anyhow!("Object may already have been freed"))
+            }
+            _ => {
+                self.state = ObjectState::Unknown;
+                Ok(())
+            }
         }
     }
 }
@@ -242,9 +308,11 @@ impl AbstractDomain for AbstractObjectInfo {
                 .cloned()
                 .collect(),
             is_unique: self.is_unique && other.is_unique,
-            state: same_or_none(&self.state, &other.state),
+            state: self.state.merge(other.state),
             type_: same_or_none(&self.type_, &other.type_),
             memory: self.memory.merge(&other.memory),
+            lower_index_bound: self.lower_index_bound.merge(&other.lower_index_bound),
+            upper_index_bound: self.upper_index_bound.merge(&other.upper_index_bound),
         }
     }
 
@@ -270,6 +338,14 @@ impl AbstractObjectInfo {
             (
                 "type".to_string(),
                 serde_json::Value::String(format!("{:?}", self.type_)),
+            ),
+            (
+                "lower_index_bound".to_string(),
+                serde_json::Value::String(format!("{}", self.lower_index_bound)),
+            ),
+            (
+                "upper_index_bound".to_string(),
+                serde_json::Value::String(format!("{}", self.upper_index_bound)),
             ),
         ];
         let memory = self
@@ -309,6 +385,26 @@ pub enum ObjectState {
     Alive,
     /// The object is dangling, i.e. the memory has been freed already.
     Dangling,
+    /// The state of the object is unknown (due to merging different object states).
+    Unknown,
+    /// The object was referenced in an "use-after-free" or "double-free" CWE-warning.
+    /// This state is meant to be temporary to prevent obvious subsequent CWE-warnings with the same root cause.
+    Flagged,
+}
+
+impl ObjectState {
+    /// Merge two object states.
+    /// If one of the two states is `Flagged`, then the resulting state is the other object state.
+    pub fn merge(self, other: Self) -> Self {
+        use ObjectState::*;
+        match (self, other) {
+            (Flagged, state) | (state, Flagged) => state,
+            (Unknown, _) | (_, Unknown) => Unknown,
+            (Alive, Alive) => Alive,
+            (Dangling, Dangling) => Dangling,
+            (Alive, Dangling) | (Dangling, Alive) => Unknown,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -319,9 +415,11 @@ mod tests {
         let obj_info = AbstractObjectInfo {
             pointer_targets: BTreeSet::new(),
             is_unique: true,
-            state: Some(ObjectState::Alive),
+            state: ObjectState::Alive,
             type_: Some(ObjectType::Heap),
             memory: MemRegion::new(ByteSize::new(8)),
+            lower_index_bound: Bitvector::from_u64(0).into(),
+            upper_index_bound: Bitvector::from_u64(99).into(),
         };
         AbstractObject(Arc::new(obj_info))
     }
@@ -363,7 +461,7 @@ mod tests {
         object.merge_value(new_data(23), &bv(-12));
         assert_eq!(
             object.get_value(Bitvector::from_i64(-12), ByteSize::new(8)),
-            Data::Value(ValueDomain::new_top(ByteSize::new(8)))
+            Data::Value(IntervalDomain::mock(4, 23).with_stride(19))
         );
 
         let mut other_object = new_abstract_object();
@@ -441,5 +539,14 @@ mod tests {
                 .into_iter()
                 .collect()
         );
+    }
+
+    #[test]
+    fn access_contained_in_bounds() {
+        let object = new_abstract_object();
+        assert!(object.access_contained_in_bounds(&IntervalDomain::mock(0, 99), ByteSize::new(1)));
+        assert!(!object.access_contained_in_bounds(&IntervalDomain::mock(-1, -1), ByteSize::new(8)));
+        assert!(object.access_contained_in_bounds(&IntervalDomain::mock(92, 92), ByteSize::new(8)));
+        assert!(!object.access_contained_in_bounds(&IntervalDomain::mock(93, 93), ByteSize::new(8)));
     }
 }

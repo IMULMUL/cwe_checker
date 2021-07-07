@@ -1,7 +1,7 @@
 use super::object::*;
 use super::{Data, ValueDomain};
-use crate::abstract_domain::*;
 use crate::prelude::*;
+use crate::{abstract_domain::*, utils::binary::RuntimeMemoryImage};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -23,13 +23,16 @@ pub struct AbstractObjectList {
 
 impl AbstractObjectList {
     /// Create a new abstract object list with just one abstract object corresponding to the stack.
-    /// The offset into the stack object will be set to zero.
+    ///
+    /// The offset into the stack object and the `upper_index_bound` of the stack object will be both set to zero.
+    /// This corresponds to the generic stack state at the start of a function.
     pub fn from_stack_id(
         stack_id: AbstractIdentifier,
         address_bytesize: ByteSize,
     ) -> AbstractObjectList {
         let mut objects = BTreeMap::new();
-        let stack_object = AbstractObject::new(ObjectType::Stack, address_bytesize);
+        let mut stack_object = AbstractObject::new(ObjectType::Stack, address_bytesize);
+        stack_object.set_upper_index_bound(Bitvector::zero(address_bytesize.into()).into());
         objects.insert(
             stack_id,
             (
@@ -41,20 +44,20 @@ impl AbstractObjectList {
     }
 
     /// Check the state of a memory object at a given address.
-    /// Returns True if at least one of the targets of the pointer is dangling.
-    /// If `report_none_states` is `true`,
+    /// Returns `true` if at least one of the targets of the pointer is dangling.
+    /// If `report_unknown_states` is `true`,
     /// then objects with unknown states get reported if they are unique.
     /// I.e. objects representing more than one actual object (e.g. an array of object) will not get reported,
-    /// even if their state is unknown and `report_none_states` is `true`.
-    pub fn is_dangling_pointer(&self, address: &Data, report_none_states: bool) -> bool {
+    /// even if their state is unknown and `report_unknown_states` is `true`.
+    pub fn is_dangling_pointer(&self, address: &Data, report_unknown_states: bool) -> bool {
         match address {
             Data::Value(_) | Data::Top(_) => (),
             Data::Pointer(pointer) => {
                 for id in pointer.ids() {
                     let (object, _offset_id) = self.objects.get(id).unwrap();
-                    match (report_none_states, object.get_state()) {
-                        (_, Some(ObjectState::Dangling)) => return true,
-                        (true, None) => {
+                    match (report_unknown_states, object.get_state()) {
+                        (_, ObjectState::Dangling) => return true,
+                        (true, ObjectState::Unknown) => {
                             if object.is_unique {
                                 return true;
                             }
@@ -66,6 +69,87 @@ impl AbstractObjectList {
         }
         // No dangling pointer found
         false
+    }
+
+    /// Mark all memory objects targeted by the given `address` pointer,
+    /// whose state is either dangling or unknown,
+    /// as flagged.
+    pub fn mark_dangling_pointer_targets_as_flagged(&mut self, address: &Data) {
+        if let Data::Pointer(pointer) = address {
+            for id in pointer.ids() {
+                let (object, _) = self.objects.get_mut(id).unwrap();
+                if matches!(
+                    object.get_state(),
+                    ObjectState::Unknown | ObjectState::Dangling
+                ) {
+                    object.set_state(ObjectState::Flagged);
+                }
+            }
+        }
+    }
+
+    /// Check whether a memory access at the given address (and accessing `size` many bytes)
+    /// may be an out-of-bounds memory access.
+    ///
+    /// Note that `Top` values as addresses are not marked as out-of-bounds,
+    /// since they are more likely due to analysis imprecision than to actual out-of-bounds access.
+    pub fn is_out_of_bounds_mem_access(
+        &self,
+        address: &Data,
+        size: ByteSize,
+        global_data: &RuntimeMemoryImage,
+    ) -> bool {
+        match address {
+            Data::Value(value) => {
+                if let Ok((start, end)) = value.try_to_offset_interval() {
+                    if start < 0 || end < start {
+                        return true;
+                    }
+                    return global_data
+                        .is_interval_readable(start as u64, end as u64 + u64::from(size) - 1)
+                        .is_err();
+                }
+            }
+            Data::Top(_) => (),
+            Data::Pointer(pointer) => {
+                for (id, offset) in pointer.targets() {
+                    let (object, base_offset) = self.objects.get(id).unwrap();
+                    let adjusted_offset = offset.clone() + base_offset.clone();
+                    if !adjusted_offset.is_top()
+                        && !object.access_contained_in_bounds(&adjusted_offset, size)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Set the lower index bound for indices to be considered inside the memory object.
+    /// The bound is inclusive, i.e. the bound index itself is also considered to be inside the memory object.
+    ///
+    /// Any `bound` value other than a constant bitvector is interpreted as the memory object not having a lower bound.
+    pub fn set_lower_index_bound(&mut self, object_id: &AbstractIdentifier, bound: &ValueDomain) {
+        let (object, base_offset) = self.objects.get_mut(object_id).unwrap();
+        let bound = (bound.clone() + base_offset.clone())
+            .try_to_bitvec()
+            .map(|bitvec| bitvec.into())
+            .unwrap_or_else(|_| BitvectorDomain::new_top(bound.bytesize()));
+        object.set_lower_index_bound(bound);
+    }
+
+    /// Set the upper index bound for indices to be considered inside the memory object.
+    /// The bound is inclusive, i.e. the bound index itself is also considered to be inside the memory object.
+    ///
+    /// Any `bound` value other than a constant bitvector is interpreted as the memory object not having an upper bound.
+    pub fn set_upper_index_bound(&mut self, object_id: &AbstractIdentifier, bound: &ValueDomain) {
+        let (object, base_offset) = self.objects.get_mut(object_id).unwrap();
+        let bound = (bound.clone() + base_offset.clone())
+            .try_to_bitvec()
+            .map(|bitvec| bitvec.into())
+            .unwrap_or_else(|_| BitvectorDomain::new_top(bound.bytesize()));
+        object.set_upper_index_bound(bound);
     }
 
     /// Get the value at a given address.
@@ -296,8 +380,8 @@ impl AbstractObjectList {
         }
     }
 
-    // Return the object type of a memory object.
-    // Returns an error if no object with the given ID is contained in the object list.
+    /// Return the object type of a memory object.
+    /// Returns an error if no object with the given ID is contained in the object list.
     pub fn get_object_type(
         &self,
         object_id: &AbstractIdentifier,
@@ -305,6 +389,16 @@ impl AbstractObjectList {
         match self.objects.get(object_id) {
             Some((object, _)) => Ok(object.get_object_type()),
             None => Err(()),
+        }
+    }
+
+    /// Returns `true` if the object corresponding to the given ID represents an unique object
+    /// and `false` if it may represent more than one object (e.g. several array elements).
+    /// Returns an error if the ID is not contained in the object list.
+    pub fn is_unique_object(&self, object_id: &AbstractIdentifier) -> Result<bool, Error> {
+        match self.objects.get(object_id) {
+            Some((object, _)) => Ok(object.is_unique),
+            None => Err(anyhow!("Object ID not contained in object list.")),
         }
     }
 }
@@ -442,7 +536,7 @@ mod tests {
             merged
                 .get_value(&Data::Pointer(pointer.clone()), ByteSize::new(8))
                 .unwrap(),
-            Data::Value(ValueDomain::new_top(ByteSize::new(8)))
+            Data::Value(IntervalDomain::mock(3, 42).with_stride(39))
         );
         assert_eq!(
             merged
@@ -501,7 +595,7 @@ mod tests {
                 .unwrap()
                 .0
                 .get_state(),
-            Some(crate::analysis::pointer_inference::object::ObjectState::Alive)
+            crate::analysis::pointer_inference::object::ObjectState::Alive
         );
         other_obj_list
             .mark_mem_object_as_freed(&modified_heap_pointer)
@@ -514,7 +608,7 @@ mod tests {
                 .unwrap()
                 .0
                 .get_state(),
-            Some(crate::analysis::pointer_inference::object::ObjectState::Dangling)
+            crate::analysis::pointer_inference::object::ObjectState::Dangling
         );
     }
 

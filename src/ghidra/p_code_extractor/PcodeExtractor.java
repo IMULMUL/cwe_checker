@@ -46,11 +46,11 @@ public class PcodeExtractor extends GhidraScript {
         SimpleBlockModel simpleBM = new SimpleBlockModel(currentProgram);
         Listing listing = currentProgram.getListing();
 
-        TermCreator.symTab = currentProgram.getSymbolTable();
-        ExternSymbolCreator.createExternalSymbolMap(TermCreator.symTab);
         setFunctionEntryPoints();
+        TermCreator.symTab = currentProgram.getSymbolTable();
         Term<Program> program = TermCreator.createProgramTerm();
         Project project = createProject(program);
+        ExternSymbolCreator.createExternalSymbolMap(TermCreator.symTab);
         program = iterateFunctions(simpleBM, listing, program);
         program.getTerm().setExternSymbols(new ArrayList<ExternSymbol>(ExternSymbolCreator.externalSymbolMap.values()));
 
@@ -58,6 +58,7 @@ public class PcodeExtractor extends GhidraScript {
         Serializer ser = new Serializer(project, jsonPath);
         ser.serializeProject();
 
+        println("Pcode was successfully extracted!");
     }
 
 
@@ -214,11 +215,16 @@ public class PcodeExtractor extends GhidraScript {
      */
     protected Boolean iteratePcode() {
         int numberOfPcodeOps = PcodeBlockData.ops.length;
+        int previousPcodeIndex = 0;
         Boolean intraInstructionJumpOccured = false;
         PcodeBlockData.pcodeIndex = 0;
         for(PcodeOp op : PcodeBlockData.ops) {
             PcodeBlockData.pcodeOp = op;
             String mnemonic = PcodeBlockData.pcodeOp.getMnemonic();
+            if (previousPcodeIndex < PcodeBlockData.pcodeIndex -1) {
+                numberOfPcodeOps++;
+            }
+            previousPcodeIndex = PcodeBlockData.pcodeIndex;
             if (JumpProcessing.jumps.contains(mnemonic) || PcodeBlockData.pcodeOp.getOpcode() == PcodeOp.UNIMPLEMENTED) {
                 intraInstructionJumpOccured = JumpProcessing.processJump(mnemonic, numberOfPcodeOps);
             } else {
@@ -249,31 +255,14 @@ public class PcodeExtractor extends GhidraScript {
         try {
             HashMap<String, RegisterConvention> conventions = new HashMap<String, RegisterConvention>();
             ParseCspecContent.parseSpecs(currentProgram, conventions);
-            addParameterRegister(conventions);
             project.setRegisterConvention(new ArrayList<RegisterConvention>(conventions.values()));
         } catch (FileNotFoundException e) {
             System.out.println(e);
         }
         project.setRegisterProperties(HelperFunctions.getRegisterList());
+        project.setDatatypeProperties(HelperFunctions.createDatatypeProperties());
 
         return project;
-    }
-
-
-    /**
-     * Adds parameter register to the RegisterCallingConvention object
-     */
-    protected void addParameterRegister(HashMap<String, RegisterConvention> conventions) {
-        PrototypeModel[] models = currentProgram.getCompilerSpec().getCallingConventions();
-        for(PrototypeModel model : models) {
-            String cconv = model.getName();
-            if(conventions.get(cconv) != null) {
-                ArrayList<String> parameters = conventions.get(cconv).getParameter();
-                for(VariableStorage storage : model.getPotentialInputRegisterStorage(currentProgram)) {
-                    parameters.add(storage.getRegister().getName());
-                }
-            }
-        }
     }
 
 

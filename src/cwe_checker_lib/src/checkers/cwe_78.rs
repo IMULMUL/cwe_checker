@@ -16,12 +16,13 @@
 //! where 'char *dest' will contain the return value)
 //!
 //! For instance:
-//!     ...
-//!     MOV RAX, qword ptr [RBP + local_10]
-//!     MOV RDI, RAX                        // RDI is the first input parameter for the strcat call and it points to [RBP + local_10]
-//!     CALL strcat
-//!     MOV RAX, qword ptr [RBP + local_10] // In the backwards analysis [RBP + local_10] will be tainted and it contains the return value
-//!     ...
+//!
+//! ```txt
+//! MOV RAX, qword ptr [RBP + local_10]
+//! MOV RDI, RAX                        // RDI is the first input parameter for the strcat call and it points to [RBP + local_10]
+//! CALL strcat
+//! MOV RAX, qword ptr [RBP + local_10] // In the backwards analysis [RBP + local_10] will be tainted and it contains the return value
+//! ```
 //!
 //! ### Symbols configurable in config.json
 //!
@@ -72,14 +73,17 @@ pub static CWE_MODULE: CweModule = CweModule {
 };
 
 /// The configuration struct
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Hash, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
 pub struct Config {
     /// The names of the system call symbols
     system_symbols: Vec<String>,
     /// The names of the string manipulating symbols
     string_symbols: Vec<String>,
-    /// The name of the user input symbols
+    /// The names of the user input symbols
     user_input_symbols: Vec<String>,
+    /// Contains the index of the format string parameter
+    /// for external symbols.
+    format_string_index: HashMap<String, usize>,
 }
 
 /// This check searches for system calls and sets their parameters as taint source if available.
@@ -202,11 +206,9 @@ fn get_entry_sub_to_entry_node_map(
     entry_sub_to_entry_blocks_map
         .into_iter()
         .filter_map(|((sub_tid, name), block_tid)| {
-            if let Some(start_node_index) = tid_to_graph_indices_map.get(&(block_tid, sub_tid)) {
-                Some((name, *start_node_index))
-            } else {
-                None
-            }
+            tid_to_graph_indices_map
+                .get(&(block_tid, sub_tid))
+                .map(|start_node_index| (name, *start_node_index))
         })
         .collect()
 }
@@ -217,10 +219,13 @@ fn get_entry_sub_to_entry_node_map(
 ///     - Maps the TID of an extern symbol that take input from the user to the corresponding extern symbol struct.
 /// - extern_symbol_map:
 ///     - Maps the TID of an extern symbol to the extern symbol struct.
+/// - format_string_index:
+///     - Maps a symbol name to the index of its format string parameter.
 pub struct SymbolMaps<'a> {
     string_symbol_map: HashMap<Tid, &'a ExternSymbol>,
     user_input_symbol_map: HashMap<Tid, &'a ExternSymbol>,
     extern_symbol_map: HashMap<Tid, &'a ExternSymbol>,
+    format_string_index: HashMap<String, usize>,
 }
 
 impl<'a> SymbolMaps<'a> {
@@ -240,16 +245,18 @@ impl<'a> SymbolMaps<'a> {
                 &config.user_input_symbols[..],
             ),
             extern_symbol_map,
+            format_string_index: config.format_string_index.clone(),
         }
     }
 }
 
 /// - block_first_def_set:
-///       - A set containing a given [`Def`] as the first `Def` of the block.
+///       - A set containing a given [`Def`](crate::intermediate_representation::Def) as the first `Def` of the block.
 ///       The keys are of the form `(Def-TID, Current-Sub-TID)`
 ///       to distinguish the nodes for blocks contained in more than one function.
 /// - block_start_last_def_map:
-///       - A map to get the node index of the `BlkStart` node containing a given [`Def`] as the last `Def` of the block.
+///       - A map to get the node index of the `BlkStart` node
+///       containing a given [`Def`](crate::intermediate_representation::Def) as the last `Def` of the block.
 ///       The keys are of the form `(Def-TID, Current-Sub-TID)`
 ///       to distinguish the nodes for blocks contained in more than one function.
 /// - jmp_to_blk_end_node_map:

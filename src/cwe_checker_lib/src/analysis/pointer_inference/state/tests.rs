@@ -290,6 +290,7 @@ fn clear_parameters_on_the_stack_on_extern_calls() {
     let stack_param = Arg::Stack {
         offset: 8,
         size: ByteSize::new(8),
+        data_type: None,
     };
     let extern_symbol = ExternSymbol {
         tid: Tid::new("symbol"),
@@ -299,6 +300,7 @@ fn clear_parameters_on_the_stack_on_extern_calls() {
         parameters: vec![stack_param],
         return_values: Vec::new(),
         no_return: false,
+        has_var_args: false,
     };
     // check the value before
     let pointer = PointerDomain::new(new_id("time0", "RSP"), bv(-12)).into();
@@ -485,16 +487,37 @@ fn specialize_by_expression_results() {
     // Expr = Var(RAX)
     let mut state = base_state.clone();
     let x = state
-        .specialize_by_expression_result(&Expression::var("RAX"), Bitvector::from_i64(7).into());
+        .specialize_by_expression_result(&Expression::var("RAX", 8), Bitvector::from_i64(7).into());
     assert!(x.is_ok());
     assert_eq!(
         state.get_register(&register("RAX")),
         Bitvector::from_i64(7).into()
     );
     let mut state = base_state.clone();
-    let x = state
-        .specialize_by_expression_result(&Expression::var("RAX"), Bitvector::from_i64(-20).into());
+    let x = state.specialize_by_expression_result(
+        &Expression::var("RAX", 8),
+        Bitvector::from_i64(-20).into(),
+    );
     assert!(x.is_err());
+
+    let mut state = base_state.clone();
+    let abstract_id = AbstractIdentifier::new(
+        Tid::new("heap_obj"),
+        AbstractLocation::from_var(&register("RAX")).unwrap(),
+    );
+    state.set_register(
+        &register("RAX"),
+        PointerDomain::new(abstract_id.clone(), IntervalDomain::mock(0, 50)).into(),
+    );
+    let x = state.specialize_by_expression_result(
+        &Expression::var("RAX", 8),
+        PointerDomain::new(abstract_id.clone(), IntervalDomain::mock(20, 70)).into(),
+    );
+    assert!(x.is_ok());
+    assert_eq!(
+        state.get_register(&register("RAX")),
+        PointerDomain::new(abstract_id, IntervalDomain::mock(20, 50)).into()
+    );
 
     // Expr = Const
     let mut state = base_state.clone();
@@ -513,7 +536,7 @@ fn specialize_by_expression_results() {
     // Expr = -Var(RAX)
     let mut state = base_state.clone();
     let x = state.specialize_by_expression_result(
-        &Expression::var("RAX").un_op(UnOpType::Int2Comp),
+        &Expression::var("RAX", 8).un_op(UnOpType::Int2Comp),
         Bitvector::from_i64(-7).into(),
     );
     assert!(x.is_ok());
@@ -577,7 +600,7 @@ fn specialize_by_binop() {
     // Expr = RAX + Const
     let mut state = base_state.clone();
     let x = state.specialize_by_expression_result(
-        &Expression::var("RAX").plus_const(20),
+        &Expression::var("RAX", 8).plus_const(20),
         IntervalDomain::mock(5, 7).into(),
     );
     assert!(x.is_ok());
@@ -589,7 +612,7 @@ fn specialize_by_binop() {
     // Expr = RAX - Const
     let mut state = base_state.clone();
     let x = state.specialize_by_expression_result(
-        &Expression::var("RAX").minus_const(20),
+        &Expression::var("RAX", 8).minus_const(20),
         Bitvector::from_i64(5).into(),
     );
     assert!(x.is_ok());
@@ -602,7 +625,7 @@ fn specialize_by_binop() {
     let mut state = base_state.clone();
     let x = state.specialize_by_expression_result(
         &Expression::BinOp {
-            lhs: Box::new(Expression::var("RAX")),
+            lhs: Box::new(Expression::var("RAX", 8)),
             op: BinOpType::IntXOr,
             rhs: Box::new(Expression::const_from_i64(3)),
         },
@@ -618,9 +641,9 @@ fn specialize_by_binop() {
     let mut state = base_state.clone();
     let x = state.specialize_by_expression_result(
         &Expression::BinOp {
-            lhs: Box::new(Expression::var("RAX")),
+            lhs: Box::new(Expression::var("RAX", 8)),
             op: BinOpType::IntOr,
-            rhs: Box::new(Expression::var("RBX")),
+            rhs: Box::new(Expression::var("RBX", 8)),
         },
         Bitvector::from_i64(0).into(),
     );
@@ -637,7 +660,7 @@ fn specialize_by_binop() {
     let mut state = base_state.clone();
     let x = state.specialize_by_expression_result(
         &Expression::BinOp {
-            lhs: Box::new(Expression::var("RAX")),
+            lhs: Box::new(Expression::var("RAX", 8)),
             op: BinOpType::IntOr,
             rhs: Box::new(Expression::const_from_i64(0)),
         },
@@ -697,7 +720,7 @@ fn specialize_by_equality_comparison() {
         &Expression::BinOp {
             lhs: Box::new(Expression::const_from_i64(23)),
             op: BinOpType::IntEqual,
-            rhs: Box::new(Expression::var("RAX")),
+            rhs: Box::new(Expression::var("RAX", 8)),
         },
         Bitvector::from_u8(1).into(),
     );
@@ -711,7 +734,7 @@ fn specialize_by_equality_comparison() {
         &Expression::BinOp {
             lhs: Box::new(Expression::const_from_i64(23)),
             op: BinOpType::IntNotEqual,
-            rhs: Box::new(Expression::var("RAX")),
+            rhs: Box::new(Expression::var("RAX", 8)),
         },
         Bitvector::from_u8(0).into(),
     );
@@ -728,7 +751,7 @@ fn specialize_by_equality_comparison() {
         &Expression::BinOp {
             lhs: Box::new(Expression::const_from_i64(23)),
             op: BinOpType::IntNotEqual,
-            rhs: Box::new(Expression::var("RAX")),
+            rhs: Box::new(Expression::var("RAX", 8)),
         },
         Bitvector::from_u8(1).into(),
     );
@@ -738,7 +761,7 @@ fn specialize_by_equality_comparison() {
         &Expression::BinOp {
             lhs: Box::new(Expression::const_from_i64(100)),
             op: BinOpType::IntEqual,
-            rhs: Box::new(Expression::var("RAX")),
+            rhs: Box::new(Expression::var("RAX", 8)),
         },
         Bitvector::from_u8(0).into(),
     );
@@ -987,4 +1010,93 @@ fn specialize_by_unsigned_comparison_op() {
         state.get_register(&register("RAX")),
         IntervalDomain::mock_with_bounds(Some(-19), -5, -1, None).into()
     );
+}
+
+#[test]
+fn stack_pointer_with_nonnegative_offset() {
+    let state = State::new(&register("RSP"), Tid::new("func_tid"));
+    let pointer = PointerDomain::new(state.stack_id.clone(), Bitvector::from_i64(-1).into()).into();
+    assert!(!state.is_stack_pointer_with_nonnegative_offset(&pointer));
+    let pointer = PointerDomain::new(state.stack_id.clone(), Bitvector::from_i64(5).into()).into();
+    assert!(state.is_stack_pointer_with_nonnegative_offset(&pointer));
+    let pointer = PointerDomain::new(state.stack_id.clone(), IntervalDomain::mock(2, 3)).into();
+    assert!(!state.is_stack_pointer_with_nonnegative_offset(&pointer)); // The offset is not a constant
+}
+
+#[test]
+fn out_of_bounds_access_recognition() {
+    let mut state = State::new(&register("RSP"), Tid::new("func_tid"));
+    let global_data = RuntimeMemoryImage::mock();
+    let heap_obj_id = new_id("heap_malloc", "RAX");
+    state.memory.add_abstract_object(
+        heap_obj_id.clone(),
+        Bitvector::from_u64(0).into(),
+        crate::analysis::pointer_inference::object::ObjectType::Heap,
+        ByteSize::new(8),
+    );
+    state
+        .memory
+        .set_lower_index_bound(&heap_obj_id, &Bitvector::from_u64(0).into());
+    state
+        .memory
+        .set_upper_index_bound(&heap_obj_id, &Bitvector::from_u64(7).into());
+
+    let pointer = PointerDomain::new(heap_obj_id.clone(), Bitvector::from_i64(-1).into()).into();
+    assert!(state.pointer_contains_out_of_bounds_target(&pointer, &global_data));
+    let pointer = PointerDomain::new(heap_obj_id.clone(), Bitvector::from_u64(0).into()).into();
+    assert!(!state.pointer_contains_out_of_bounds_target(&pointer, &global_data));
+    let pointer = PointerDomain::new(heap_obj_id.clone(), Bitvector::from_u64(7).into()).into();
+    assert!(!state.pointer_contains_out_of_bounds_target(&pointer, &global_data));
+    let pointer = PointerDomain::new(heap_obj_id.clone(), Bitvector::from_u64(8).into()).into();
+    assert!(state.pointer_contains_out_of_bounds_target(&pointer, &global_data));
+
+    let address = PointerDomain::new(heap_obj_id.clone(), Bitvector::from_u64(0).into()).into();
+    state.set_register(&Variable::mock("RAX", 8), address);
+    let load_def = Def::load(
+        "tid",
+        Variable::mock("RBX", 8),
+        Expression::Var(Variable::mock("RAX", 8)),
+    );
+    assert!(!state.contains_out_of_bounds_mem_access(&load_def.term, &global_data));
+
+    let address = PointerDomain::new(heap_obj_id.clone(), Bitvector::from_u64(0).into()).into();
+    state.set_register(&Variable::mock("RAX", 8), address);
+    assert!(!state.contains_out_of_bounds_mem_access(&load_def.term, &global_data));
+    let address = PointerDomain::new(heap_obj_id.clone(), Bitvector::from_u64(1).into()).into();
+    state.set_register(&Variable::mock("RAX", 8), address);
+    assert!(state.contains_out_of_bounds_mem_access(&load_def.term, &global_data));
+    let address = PointerDomain::new(state.stack_id.clone(), Bitvector::from_u64(8).into()).into();
+    state.set_register(&Variable::mock("RAX", 8), address);
+    assert!(!state.contains_out_of_bounds_mem_access(&load_def.term, &global_data));
+}
+
+#[test]
+fn specialize_pointer_comparison() {
+    let mut state = State::new(&register("RSP"), Tid::new("func_tid"));
+    let interval = IntervalDomain::mock(-5, 10);
+    state.set_register(
+        &register("RAX"),
+        PointerDomain::new(new_id("func_tid", "RSP"), interval.into()).into(),
+    );
+    let interval = IntervalDomain::mock(20, 20);
+    state.set_register(
+        &register("RBX"),
+        PointerDomain::new(new_id("func_tid", "RSP"), interval.into()).into(),
+    );
+    let expression = Expression::BinOp {
+        op: BinOpType::IntEqual,
+        lhs: Box::new(Expression::Var(register("RAX"))),
+        rhs: Box::new(Expression::Var(register("RBX"))),
+    };
+    assert!(state
+        .clone()
+        .specialize_by_expression_result(&expression, Bitvector::from_i8(1).into())
+        .is_err());
+    let specialized_interval = IntervalDomain::mock_with_bounds(None, -5, 10, Some(19));
+    let specialized_pointer =
+        PointerDomain::new(new_id("func_tid", "RSP"), specialized_interval.into()).into();
+    assert!(state
+        .specialize_by_expression_result(&expression, Bitvector::from_i8(0).into())
+        .is_ok());
+    assert_eq!(state.get_register(&register("RAX")), specialized_pointer);
 }

@@ -2,10 +2,22 @@
 //!
 //! The goal of the pointer inference analysis is to keep track of all memory objects and pointers
 //! that the program knows about at specific program points during execution.
-//! Possible memory management errors, like access to memory that may already have been freed,
-//! are reported to the user.
+//! If the **Memory** check is enabled,
+//! then the analysis also detects and reports possible memory management errors,
+//! like "Use after free"-errors, to the user.
+//! The result of the pointer inference analysis is also used as input for other analyses,
+//! which allows them to keep track of memory objects and pointers.
 //!
-//! Keep in mind that the analysis operates on a best-effort basis.
+//! ## The Memory Check
+//!
+//! If the **Memory** check is enabled, the pointer inference detects instances of the following CWEs:
+//! - [CWE-119](https://cwe.mitre.org/data/definitions/119.html) Buffer Overflow (generic case)
+//! - [CWE-125](https://cwe.mitre.org/data/definitions/125.html) Buffer Overflow: Out-of-bounds Read
+//! - [CWE-415](https://cwe.mitre.org/data/definitions/415.html): Double Free
+//! - [CWE-416](https://cwe.mitre.org/data/definitions/416.html): Use After Free
+//! - [CWE-787](https://cwe.mitre.org/data/definitions/787.html): Buffer Overflow: Out-of-bounds Write
+//!
+//! The analysis operates on a best-effort basis.
 //! In cases where we cannot know
 //! whether an error is due to an error in the memory management of the program under analysis
 //! or due to inexactness of the pointer inference analysis itself,
@@ -38,7 +50,7 @@ use context::Context;
 pub use state::State;
 
 /// The version number of the analysis.
-const VERSION: &str = "0.1";
+const VERSION: &str = "0.2";
 
 /// The name and version number of the "Memory" CWE check.
 pub static CWE_MODULE: crate::CweModule = crate::CweModule {
@@ -118,7 +130,17 @@ impl<'a> PointerInference<'a> {
                 if let Some(start_node_index) =
                     tid_to_graph_indices_map.get(&(block_tid, sub_tid.clone()))
                 {
-                    Some((sub_tid.clone(), *start_node_index))
+                    // We only add entry points that are also control flow graph roots
+                    if context
+                        .graph
+                        .neighbors_directed(*start_node_index, Direction::Incoming)
+                        .next()
+                        .is_none()
+                    {
+                        Some((sub_tid.clone(), *start_node_index))
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
@@ -492,6 +514,11 @@ mod tests {
             };
             let (log_sender, _) = crossbeam_channel::unbounded();
             PointerInference::new(project, mem_image, graph, config, log_sender)
+        }
+
+        pub fn set_node_value(&mut self, node_value: State, node_index: NodeIndex) {
+            self.computation
+                .set_node_value(node_index, NodeValue::Value(node_value));
         }
     }
 }

@@ -6,7 +6,7 @@ use crate::{
 
 use super::*;
 
-fn extern_symbol(name: &str, return_args: Vec<Arg>) -> ExternSymbol {
+fn extern_symbol(name: &str, return_args: Vec<Arg>, has_var_args: bool) -> ExternSymbol {
     ExternSymbol {
         tid: Tid::new(name.to_string()),
         addresses: vec![],
@@ -15,6 +15,7 @@ fn extern_symbol(name: &str, return_args: Vec<Arg>) -> ExternSymbol {
         parameters: Vec::new(),
         return_values: return_args,
         no_return: false,
+        has_var_args,
     }
 }
 
@@ -24,10 +25,13 @@ fn bv(value: i64) -> ValueDomain {
 
 impl State {
     pub fn mock_with_pi_state() -> (State, PointerInferenceState) {
-        let arg = Arg::Register(Variable::mock("RAX", 8 as u64));
+        let arg = Arg::Register {
+            var: Variable::mock("RAX", 8 as u64),
+            data_type: None,
+        };
         let pi_state =
             PointerInferenceState::new(&Variable::mock("RSP", 8 as u64), Tid::new("func"));
-        let symbol = extern_symbol("system", vec![arg]);
+        let symbol = extern_symbol("system", vec![arg], false);
         let current_sub = Sub::mock("current");
         let mut state = State::new(
             &symbol,
@@ -65,10 +69,6 @@ impl State {
 
         None
     }
-
-    pub fn remove_all_register_taints(&mut self) {
-        self.register_taint = HashMap::new();
-    }
 }
 
 struct Setup {
@@ -77,7 +77,8 @@ struct Setup {
     rdi: Variable,
     rsi: Variable,
     rsp: Variable,
-    constant: Bitvector,
+    constant: String,
+    constant_address: Bitvector,
     def_tid: Tid,
     stack_pointer: DataDomain<ValueDomain>,
     base_eight_offset: DataDomain<ValueDomain>,
@@ -94,7 +95,8 @@ impl Setup {
             rdi: Variable::mock("RDI", 8 as u64),
             rsi: Variable::mock("RSI", 8 as u64),
             rsp: Variable::mock("RSP", 8 as u64),
-            constant: Bitvector::from_str_radix(16, "ffcc00").unwrap(),
+            constant: String::from("Hello World"),
+            constant_address: Bitvector::from_u32(12290),
             def_tid: Tid::new("def"),
             stack_pointer: Data::Pointer(PointerDomain::new(stack_id.clone(), bv(0))),
             base_eight_offset: Data::Pointer(PointerDomain::new(stack_id.clone(), bv(-8))),
@@ -115,7 +117,7 @@ fn setting_expression_and_constants() {
         .set_pointer_inference_state_for_def(Some(setup.pi_state.clone()), &setup.def_tid);
 
     // Test Case 1: Constants
-    let copy_const_expr = Expression::const_from_apint(setup.constant.clone());
+    let copy_const_expr = Expression::const_from_apint(setup.constant_address);
     setup
         .state
         .set_register_taint(&setup.rdi, Taint::Tainted(setup.rdi.size));
@@ -125,6 +127,7 @@ fn setting_expression_and_constants() {
         &setup.rdi,
         &copy_const_expr,
         &setup.rsp,
+        &RuntimeMemoryImage::mock(),
     );
     assert_eq!(setup.state.get_register_taint(&setup.rdi), None);
     assert_eq!(setup.state.string_constants.len(), 1);
@@ -134,7 +137,7 @@ fn setting_expression_and_constants() {
     );
 
     // Test Case 2: Variables
-    let copy_var_expr = Expression::var("RSI");
+    let copy_var_expr = Expression::var("RSI", 8);
     setup
         .state
         .set_register_taint(&setup.rdi, Taint::Tainted(setup.rdi.size));
@@ -144,6 +147,7 @@ fn setting_expression_and_constants() {
         &setup.rdi,
         &copy_var_expr,
         &setup.rsp,
+        &RuntimeMemoryImage::mock(),
     );
     assert_eq!(setup.state.get_register_taint(&setup.rdi), None);
     assert_eq!(
@@ -152,7 +156,7 @@ fn setting_expression_and_constants() {
     );
 
     // Test Case 2.5: Stack Pointer Assignment
-    let stack_expression = Expression::var("RSP");
+    let stack_expression = Expression::var("RSP", 8);
     setup
         .state
         .set_register_taint(&setup.rdi, Taint::Tainted(setup.rdi.size));
@@ -161,6 +165,7 @@ fn setting_expression_and_constants() {
         &setup.rdi,
         &stack_expression,
         &setup.rsp,
+        &RuntimeMemoryImage::mock(),
     );
     assert_eq!(setup.state.get_register_taint(&setup.rdi), None);
     assert_eq!(
@@ -171,7 +176,7 @@ fn setting_expression_and_constants() {
     );
 
     // Test Case 3: Bin Ops
-    let bin_op_expr = Expression::var("RBP").plus_const(-8);
+    let bin_op_expr = Expression::var("RBP", 8).plus_const(-8);
     setup
         .state
         .set_register_taint(&setup.rdi, Taint::Tainted(setup.rdi.size));
@@ -181,6 +186,7 @@ fn setting_expression_and_constants() {
         &setup.rdi,
         &bin_op_expr,
         &setup.rsp,
+        &RuntimeMemoryImage::mock(),
     );
     assert_eq!(setup.state.get_register_taint(&setup.rdi), None);
     assert_eq!(
@@ -191,7 +197,7 @@ fn setting_expression_and_constants() {
     );
 
     // Test Case 4: Any other Expression
-    let cast_expr = Expression::var("RDI")
+    let cast_expr = Expression::var("RDI", 8)
         .subpiece(ByteSize::new(0), ByteSize::new(4))
         .cast(CastOpType::IntZExt);
 
@@ -203,6 +209,7 @@ fn setting_expression_and_constants() {
         &setup.rdi,
         &cast_expr,
         &setup.rsp,
+        &RuntimeMemoryImage::mock(),
     );
     assert_eq!(
         setup.state.get_register_taint(&setup.rdi),
@@ -227,9 +234,10 @@ fn tainting_values_to_be_stored() {
         .save_taint_to_memory(&setup.base_eight_offset, Taint::Tainted(ByteSize::new(8)));
     setup.state.taint_value_to_be_stored(
         &setup.def_tid,
-        &Expression::var("RDI"),
-        &Expression::var("RSI"),
+        &Expression::var("RDI", 8),
+        &Expression::var("RSI", 8),
         &stack_pointer,
+        &RuntimeMemoryImage::mock(),
     );
     assert_eq!(
         setup
@@ -252,9 +260,10 @@ fn tainting_values_to_be_stored() {
         .set_pointer_inference_state_for_def(Some(setup.pi_state.clone()), &setup.def_tid);
     setup.state.taint_value_to_be_stored(
         &setup.def_tid,
-        &Expression::var("RDI"),
-        &Expression::var("RSI"),
+        &Expression::var("RDI", 8),
+        &Expression::var("RSI", 8),
         &stack_pointer,
+        &RuntimeMemoryImage::mock(),
     );
     assert_eq!(setup.state.get_register_taint(&setup.rsi), None);
 }
@@ -270,18 +279,24 @@ fn tainting_def_input_register() {
         .set_pointer_inference_state_for_def(Some(setup.pi_state.clone()), &setup.def_tid);
 
     // Test Case 1: Variable input
-    setup
-        .state
-        .taint_def_input_register(&Expression::var("RDI"), &stack_pointer, &setup.def_tid);
+    setup.state.taint_def_input_register(
+        &Expression::var("RDI", 8),
+        &stack_pointer,
+        &setup.def_tid,
+        &RuntimeMemoryImage::mock(),
+    );
     assert_eq!(
         setup.state.get_register_taint(&rdi_reg),
         Some(&Taint::Tainted(rdi_reg.size))
     );
 
     // Test Case 2: Stack Pointer input
-    setup
-        .state
-        .taint_def_input_register(&Expression::var("RSP"), &stack_pointer, &setup.def_tid);
+    setup.state.taint_def_input_register(
+        &Expression::var("RSP", 8),
+        &stack_pointer,
+        &setup.def_tid,
+        &RuntimeMemoryImage::mock(),
+    );
 
     assert_eq!(
         setup
@@ -294,9 +309,10 @@ fn tainting_def_input_register() {
 
     // Test Case 3: Bin Op Input
     setup.state.taint_def_input_register(
-        &Expression::var("RDI").plus_const(8),
+        &Expression::var("RDI", 8).plus_const(8),
         &stack_pointer,
         &setup.def_tid,
+        &RuntimeMemoryImage::mock(),
     );
     assert_eq!(
         setup.state.get_register_taint(&rdi_reg),
@@ -307,9 +323,10 @@ fn tainting_def_input_register() {
 
     // Test Case 4: Cast Op Input
     setup.state.taint_def_input_register(
-        &Expression::var("RDI").cast(CastOpType::IntZExt),
+        &Expression::var("RDI", 8).cast(CastOpType::IntZExt),
         &stack_pointer,
         &setup.def_tid,
+        &RuntimeMemoryImage::mock(),
     );
     assert_eq!(
         setup.state.get_register_taint(&rdi_reg),

@@ -87,6 +87,89 @@ impl ByteSize {
     }
 }
 
+/// Properties of C/C++ data types such as size.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Hash, Clone)]
+pub struct DatatypeProperties {
+    /// Holds the size of the char type
+    pub char_size: ByteSize,
+    /// Holds the size of the double type
+    pub double_size: ByteSize,
+    /// Holds the size of the float type
+    pub float_size: ByteSize,
+    /// Holds the size of the integer type
+    pub integer_size: ByteSize,
+    /// Holds the size of the long double type
+    pub long_double_size: ByteSize,
+    /// Holds the size of the long long type
+    pub long_long_size: ByteSize,
+    /// Holds the size of the long type
+    pub long_size: ByteSize,
+    /// Holds the size of the pointer type
+    pub pointer_size: ByteSize,
+    /// Holds the size of the short type
+    pub short_size: ByteSize,
+}
+
+impl DatatypeProperties {
+    /// Matches a given data type with its size from the properties struct.
+    pub fn get_size_from_data_type(&self, data_type: Datatype) -> ByteSize {
+        match data_type {
+            Datatype::Char => self.char_size,
+            Datatype::Double => self.double_size,
+            Datatype::Float => self.float_size,
+            Datatype::Integer => self.integer_size,
+            Datatype::LongDouble => self.long_double_size,
+            Datatype::LongLong => self.long_long_size,
+            Datatype::Long => self.long_size,
+            Datatype::Pointer => self.pointer_size,
+            Datatype::Short => self.short_size,
+        }
+    }
+}
+
+/// C/C++ data types.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Hash, Clone)]
+pub enum Datatype {
+    /// C char data type
+    Char,
+    /// C double data type
+    Double,
+    /// C float data type
+    Float,
+    /// C integer data type
+    Integer,
+    /// C long double data type
+    LongDouble,
+    /// C long long data type
+    LongLong,
+    /// C long data type
+    Long,
+    /// C pointer data type
+    Pointer,
+    /// C short data type
+    Short,
+}
+
+impl From<String> for Datatype {
+    /// The purpose of this conversion is to locate parameters to variadic functions.
+    /// Therefore, char types have to be mapped to the integer size since they undergo the default
+    /// argument promotion. (e.g. 1 byte char -> 4 byte integer)
+    /// The same holds for all float types that are promoted to doubles. (e.g. 8 byte float -> 16 byte double)
+    fn from(specifier: String) -> Self {
+        match specifier.as_str() {
+            "c" | "C" => Datatype::Char,
+            "d" | "i" | "u" | "o" | "p" | "x" | "X" | "hi" | "hd" | "hu" => Datatype::Integer,
+            "s" | "S" | "n" => Datatype::Pointer,
+            "lf" | "lg" | "le" | "la" | "lF" | "lG" | "lE" | "lA" | "f" | "F" | "e" | "E" | "a"
+            | "A" | "g" | "G" => Datatype::Double,
+            "li" | "ld" | "lu" => Datatype::Long,
+            "lli" | "lld" | "llu" => Datatype::LongLong,
+            "Lf" | "Lg" | "Le" | "La" | "LF" | "LG" | "LE" | "LA" => Datatype::LongDouble,
+            _ => panic!("Invalid data type specifier from format string."),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use apint::BitWidth;
