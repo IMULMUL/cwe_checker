@@ -20,6 +20,7 @@
 //!
 //! In the current implementation edge transition functions are also allowed to return `None`
 //! to indicate that no information flows through the edge.
+//! In such a case the value at the target node of the edge will not get updated.
 //! For example, an analysis can use this to indicate edges that are never taken
 //! and thus prevent dead code to affect the analysis.
 //!
@@ -34,22 +35,24 @@
 //! The `Computation` object also contains methods to actually run the fixpoint computation after the starting values are set
 //! and methods to retrieve the results of the computation.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Debug;
+
 use fnv::FnvHashMap;
 use petgraph::graph::{DiGraph, EdgeIndex, NodeIndex};
 use petgraph::visit::EdgeRef;
-use std::collections::{BTreeMap, BTreeSet};
 
 /// The context of a fixpoint computation.
 ///
 /// All trait methods have access to the FixpointProblem structure, so that context informations are accessible through it.
 pub trait Context {
-    /// the type of edge labels of the underlying graph
-    type EdgeLabel: Clone;
-    /// the type of node labels of the underlying graph
-    type NodeLabel;
+    /// The type of edge labels of the underlying graph.
+    type EdgeLabel: Debug + Clone;
+    /// The type of node labels of the underlying graph.
+    type NodeLabel: Debug;
     /// The type of the value that gets assigned to each node.
     /// The values should form a partially ordered set.
-    type NodeValue: PartialEq + Eq;
+    type NodeValue: PartialEq + Eq + Clone;
 
     /// Get the graph on which the fixpoint computation operates.
     fn get_graph(&self) -> &DiGraph<Self::NodeLabel, Self::EdgeLabel>;
@@ -91,8 +94,6 @@ pub struct Computation<T: Context> {
     priority_to_node_list: Vec<NodeIndex>,
     /// The worklist contains the priority numbers (not the node indices!) of nodes marked as not yet stabilized.
     worklist: BTreeSet<usize>,
-    /// The (optional) default value assigned to nodes without an explicit value.
-    default_value: Option<T::NodeValue>,
     /// The internal map containing all known node values.
     node_values: FnvHashMap<NodeIndex, T::NodeValue>,
 }
@@ -103,40 +104,48 @@ impl<T: Context> Computation<T> {
     pub fn new(fp_context: T, default_value: Option<T::NodeValue>) -> Self {
         let graph = fp_context.get_graph();
         // order the nodes in weak topological order
-        let sorted_nodes: Vec<NodeIndex> = petgraph::algo::kosaraju_scc(&graph)
+        let priority_sorted_nodes: Vec<NodeIndex> = petgraph::algo::kosaraju_scc(&graph)
             .into_iter()
             .flatten()
-            .rev()
             .collect();
+        Self::from_node_priority_list(fp_context, default_value, priority_sorted_nodes)
+    }
+
+    /// Create a new fixpoint computation from a fixpoint problem, an optional default value
+    /// and the list of nodes of the graph ordered by the priority for the worklist algorithm.
+    /// The worklist algorithm will try to stabilize the nodes with a higher index
+    /// in the `priority_sorted_nodes` array before those with a lower index.
+    pub fn from_node_priority_list(
+        fp_context: T,
+        default_value: Option<T::NodeValue>,
+        priority_sorted_nodes: Vec<NodeIndex>,
+    ) -> Self {
         let mut node_to_index = BTreeMap::new();
-        for (i, node_index) in sorted_nodes.iter().enumerate() {
+        for (i, node_index) in priority_sorted_nodes.iter().enumerate() {
             node_to_index.insert(node_index, i);
         }
         let node_priority_list: Vec<usize> = node_to_index.values().copied().collect();
         let mut worklist = BTreeSet::new();
         // If a default value exists, all nodes are added to the worklist. If not, the worklist is empty
-        if default_value.is_some() {
-            for i in 0..sorted_nodes.len() {
+        let mut node_values: FnvHashMap<NodeIndex, T::NodeValue> = FnvHashMap::default();
+        if let Some(default) = default_value {
+            for i in 0..priority_sorted_nodes.len() {
                 worklist.insert(i);
+                node_values.insert(NodeIndex::new(i), default.clone());
             }
         }
         Computation {
             fp_context,
             node_priority_list,
-            priority_to_node_list: sorted_nodes,
+            priority_to_node_list: priority_sorted_nodes,
             worklist,
-            default_value,
-            node_values: FnvHashMap::default(),
+            node_values,
         }
     }
 
     /// Get the value of a node.
     pub fn get_node_value(&self, node: NodeIndex) -> Option<&T::NodeValue> {
-        if let Some(ref value) = self.node_values.get(&node) {
-            Some(value)
-        } else {
-            self.default_value.as_ref()
-        }
+        self.node_values.get(&node)
     }
 
     /// Set the value of a node and mark the node as not yet stabilized.
@@ -184,12 +193,27 @@ impl<T: Context> Computation<T> {
         }
     }
 
+    /// Remove the highest priority node from the internal worklist and return it.
+    fn take_next_node_from_worklist(&mut self) -> Option<NodeIndex> {
+        if let Some(priority) = self.worklist.iter().next_back().cloned() {
+            let priority = self.worklist.take(&priority).unwrap();
+            Some(self.priority_to_node_list[priority])
+        } else {
+            None
+        }
+    }
+
     /// Compute the fixpoint of the fixpoint problem.
-    /// Each node will be visited at most max_steps times.
-    /// If a node does not stabilize after max_steps visits, the end result will not be a fixpoint but only an intermediate result of a fixpoint computation.
+    ///
+    /// Each node will be visited at most `max_steps` times.
+    /// If a node does not stabilize after `max_steps` visits, the end result
+    /// will not be a fixpoint but only an intermediate result of a fixpoint
+    /// computation.
     pub fn compute_with_max_steps(&mut self, max_steps: u64) {
         let mut steps = vec![0; self.fp_context.get_graph().node_count()];
+
         let mut non_stabilized_nodes = BTreeSet::new();
+
         while let Some(priority) = self.worklist.iter().next_back().cloned() {
             let priority = self.worklist.take(&priority).unwrap();
             let node = self.priority_to_node_list[priority];
@@ -207,9 +231,7 @@ impl<T: Context> Computation<T> {
     /// Compute the fixpoint of the fixpoint problem.
     /// If the fixpoint algorithm does not converge to a fixpoint, this function will not terminate.
     pub fn compute(&mut self) {
-        while let Some(priority) = self.worklist.iter().next_back().cloned() {
-            let priority = self.worklist.take(&priority).unwrap();
-            let node = self.priority_to_node_list[priority];
+        while let Some(node) = self.take_next_node_from_worklist() {
             self.update_node(node);
         }
     }
@@ -217,6 +239,16 @@ impl<T: Context> Computation<T> {
     /// Get a reference to the internal map where one can look up the current values of all nodes
     pub fn node_values(&self) -> &FnvHashMap<NodeIndex, T::NodeValue> {
         &self.node_values
+    }
+
+    /// Get a mutable iterator over all node values.
+    /// Also add all nodes that have values to the worklist, because one can change all their values through the iterator.
+    pub fn node_values_mut(&mut self) -> impl Iterator<Item = &mut T::NodeValue> {
+        for node in self.node_values.keys() {
+            let priority = self.node_priority_list[node.index()];
+            self.worklist.insert(priority);
+        }
+        self.node_values.values_mut()
     }
 
     /// Get a reference to the underlying graph
@@ -289,5 +321,66 @@ mod tests {
 
         assert_eq!(30, *solution.get_node_value(NodeIndex::new(9)).unwrap());
         assert_eq!(0, *solution.get_node_value(NodeIndex::new(5)).unwrap());
+    }
+
+    #[test]
+    fn fixpoint_with_default_value() {
+        let mut graph: DiGraph<(), u64> = DiGraph::new();
+        for _i in 0..101 {
+            graph.add_node(());
+        }
+        for i in 0..100 {
+            graph.add_edge(NodeIndex::new(i), NodeIndex::new(i + 1), i as u64 % 10 + 1);
+        }
+        for i in 0..10 {
+            graph.add_edge(NodeIndex::new(i * 10), NodeIndex::new(i * 10 + 5), 0);
+        }
+
+        let mut solution = Computation::new(FPContext { graph }, Some(100));
+        solution.set_node_value(NodeIndex::new(10), 0);
+        solution.compute_with_max_steps(20);
+
+        assert_eq!(100, *solution.get_node_value(NodeIndex::new(0)).unwrap());
+        assert_eq!(3, *solution.get_node_value(NodeIndex::new(12)).unwrap());
+    }
+
+    #[test]
+    fn worklist_node_order() {
+        let mut graph: DiGraph<(), u64> = DiGraph::new();
+        for _i in 0..21 {
+            graph.add_node(());
+        }
+        for i in 1..19 {
+            graph.add_edge(NodeIndex::new(0), NodeIndex::new(i), 1);
+        }
+        for i in 1..19 {
+            graph.add_edge(NodeIndex::new(i), NodeIndex::new(19), 1);
+        }
+        graph.add_edge(NodeIndex::new(19), NodeIndex::new(20), 1);
+        let mut computation = Computation::new(
+            FPContext {
+                graph: graph.clone(),
+            },
+            Some(1),
+        );
+        assert!(computation.node_priority_list[0] > computation.node_priority_list[1]);
+        assert!(computation.node_priority_list[1] > computation.node_priority_list[19]);
+        assert!(computation.node_priority_list[19] > computation.node_priority_list[20]);
+        // assert that the nodes have the correct priority ordering
+        assert_eq!(
+            computation.take_next_node_from_worklist(),
+            Some(NodeIndex::new(0))
+        );
+        for _i in 1..19 {
+            assert!(computation.take_next_node_from_worklist().unwrap().index() < 19);
+        }
+        assert_eq!(
+            computation.take_next_node_from_worklist(),
+            Some(NodeIndex::new(19))
+        );
+        assert_eq!(
+            computation.take_next_node_from_worklist(),
+            Some(NodeIndex::new(20))
+        );
     }
 }

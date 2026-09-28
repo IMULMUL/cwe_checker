@@ -12,9 +12,13 @@
 use super::fixpoint::Context as GeneralFPContext;
 use super::graph::*;
 use super::interprocedural_fixpoint_generic::*;
+
 use crate::intermediate_representation::*;
-use petgraph::graph::EdgeIndex;
+
 use std::marker::PhantomData;
+
+use petgraph::graph::EdgeIndex;
+use petgraph::graph::NodeIndex;
 
 /// The context for an interprocedural fixpoint computation.
 ///
@@ -57,6 +61,7 @@ pub trait Context<'a> {
         value: &Self::Value,
         call: &Term<Jmp>,
         target: &Node,
+        calling_convention: &Option<String>,
     ) -> Option<Self::Value>;
 
     /// Transition function for return instructions.
@@ -68,6 +73,7 @@ pub trait Context<'a> {
         value_before_call: Option<&Self::Value>,
         call_term: &Term<Jmp>,
         return_term: &Term<Jmp>,
+        calling_convention: &Option<String>,
     ) -> Option<Self::Value>;
 
     /// Transition function for calls to functions not contained in the binary.
@@ -115,7 +121,8 @@ impl<'a, T: Context<'a>> GeneralFPContext for GeneralizedContext<'a, T> {
         self.context.get_graph()
     }
 
-    /// Merge two values using the merge function from the interprocedural context object.
+    /// Merge two values using the merge function from the interprocedural
+    /// context object.
     fn merge(&self, val1: &Self::NodeValue, val2: &Self::NodeValue) -> Self::NodeValue {
         use NodeValue::*;
         match (val1, val2) {
@@ -163,7 +170,12 @@ impl<'a, T: Context<'a>> GeneralFPContext for GeneralizedContext<'a, T> {
             Edge::CallCombine(_) => Some(Self::NodeValue::Value(node_value.unwrap_value().clone())),
             Edge::Call(call) => self
                 .context
-                .update_call(node_value.unwrap_value(), call, &graph[end_node])
+                .update_call(
+                    node_value.unwrap_value(),
+                    call,
+                    &graph[end_node],
+                    &graph[end_node].get_sub().term.calling_convention,
+                )
                 .map(NodeValue::Value),
             Edge::CrCallStub => Some(NodeValue::CallFlowCombinator {
                 call_stub: Some(node_value.unwrap_value().clone()),
@@ -179,23 +191,23 @@ impl<'a, T: Context<'a>> GeneralFPContext for GeneralizedContext<'a, T> {
                     call_stub,
                     interprocedural_flow,
                 } => {
-                    let return_from_block = match graph.node_weight(start_node) {
+                    let (return_from_block, return_from_sub) = match graph.node_weight(start_node) {
                         Some(Node::CallReturn {
                             call: _,
-                            return_: (return_from_block, _),
-                        }) => return_from_block,
+                            return_: (return_from_block, return_from_sub),
+                        }) => (return_from_block, return_from_sub),
                         _ => panic!("Malformed Control flow graph"),
                     };
                     let return_from_jmp = &return_from_block.term.jmps[0];
-                    match self.context.update_return(
-                        interprocedural_flow.as_ref(),
-                        call_stub.as_ref(),
-                        call_term,
-                        return_from_jmp,
-                    ) {
-                        Some(val) => Some(NodeValue::Value(val)),
-                        None => None,
-                    }
+                    self.context
+                        .update_return(
+                            interprocedural_flow.as_ref(),
+                            call_stub.as_ref(),
+                            call_term,
+                            return_from_jmp,
+                            &return_from_sub.term.calling_convention,
+                        )
+                        .map(NodeValue::Value)
                 }
             },
             Edge::ExternCallStub(call) => self
@@ -259,3 +271,175 @@ pub fn create_computation<'a, T: Context<'a>>(
     let generalized_problem = GeneralizedContext::new(problem);
     super::fixpoint::Computation::new(generalized_problem, default_value.map(NodeValue::Value))
 }
+
+/// Returns a node ordering with callee nodes behind caller nodes.
+pub fn create_bottom_up_worklist(graph: &Graph) -> Vec<NodeIndex> {
+    let mut graph = graph.clone();
+    graph.retain_edges(|frozen, edge| !matches!(frozen[edge], Edge::Call(..)));
+    petgraph::algo::kosaraju_scc(&graph)
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+/// Returns a node ordering with caller nodes behind callee nodes.
+pub fn create_top_down_worklist(graph: &Graph) -> Vec<NodeIndex> {
+    let mut graph = graph.clone();
+    graph.retain_edges(|frozen, edge| !matches!(frozen[edge], Edge::CrReturnStub));
+    petgraph::algo::kosaraju_scc(&graph)
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+/// Generate a new computation from the corresponding context and an optional default value for nodes.
+/// Uses a bottom up worklist order when computing the fixpoint.
+///
+/// The worklist order prefers callee nodes before caller nodes.
+pub fn create_computation_with_bottom_up_worklist_order<'a, T: Context<'a>>(
+    problem: T,
+    default_value: Option<T::Value>,
+) -> super::fixpoint::Computation<GeneralizedContext<'a, T>> {
+    let priority_sorted_nodes: Vec<NodeIndex> = create_bottom_up_worklist(problem.get_graph());
+    let generalized_problem = GeneralizedContext::new(problem);
+    super::fixpoint::Computation::from_node_priority_list(
+        generalized_problem,
+        default_value.map(NodeValue::Value),
+        priority_sorted_nodes,
+    )
+}
+
+/// Generate a new computation from the corresponding context and an optional default value for nodes.
+/// Uses a top down worklist order when computing the fixpoint.
+///
+/// The worklist order prefers caller nodes before callee nodes.
+pub fn create_computation_with_top_down_worklist_order<'a, T: Context<'a>>(
+    problem: T,
+    default_value: Option<T::Value>,
+) -> super::fixpoint::Computation<GeneralizedContext<'a, T>> {
+    let priority_sorted_nodes: Vec<NodeIndex> = create_top_down_worklist(problem.get_graph());
+    let generalized_problem = GeneralizedContext::new(problem);
+    super::fixpoint::Computation::from_node_priority_list(
+        generalized_problem,
+        default_value.map(NodeValue::Value),
+        priority_sorted_nodes,
+    )
+}
+
+// TODO: Fix tests.
+/*
+#[cfg(test)]
+mod tests {
+
+    use crate::{
+        analysis::{
+            expression_propagation::Context,
+            forward_interprocedural_fixpoint::{
+                create_computation_with_bottom_up_worklist_order,
+                create_computation_with_top_down_worklist_order,
+            },
+        },
+        expr,
+        intermediate_representation::*,
+    };
+    use std::collections::{BTreeMap, HashMap};
+
+    fn new_block(name: &str) -> Term<Blk> {
+        Term {
+            tid: Tid::new(name),
+            term: Blk {
+                defs: vec![],
+                jmps: vec![],
+                indirect_jmp_targets: Vec::new(),
+            },
+        }
+    }
+
+    /// Creates a project with one caller function of two blocks and one callee function of one block.
+    fn mock_project() -> Project {
+        let mut callee_block = new_block("callee block");
+        callee_block.term.jmps.push(Term {
+            tid: Tid::new("ret"),
+            term: Jmp::Return(expr!("42:4")),
+        });
+
+        let called_function = Term {
+            tid: Tid::new("called_function"),
+            term: Sub {
+                name: "called_function".to_string(),
+                blocks: vec![callee_block],
+                calling_convention: Some("_stdcall".to_string()),
+            },
+        };
+
+        let mut caller_block_2 = new_block("caller_block_2");
+
+        let mut caller_block_1 = new_block("caller_block_1");
+        caller_block_1.term.jmps.push(Term {
+            tid: Tid::new("call"),
+            term: Jmp::Call {
+                target: called_function.tid.clone(),
+                return_: Some(caller_block_2.tid.clone()),
+            },
+        });
+
+        caller_block_2.term.jmps.push(Term {
+            tid: Tid::new("jmp"),
+            term: Jmp::Branch(caller_block_1.tid.clone()),
+        });
+
+        let caller_function = Term {
+            tid: Tid::new("caller_function"),
+            term: Sub {
+                name: "caller_function".to_string(),
+                blocks: vec![caller_block_1, caller_block_2],
+                calling_convention: Some("_stdcall".to_string()),
+            },
+        };
+        let mut project = Project::mock_x64();
+        project.program.term.subs = BTreeMap::from([
+            (caller_function.tid.clone(), caller_function.clone()),
+            (called_function.tid.clone(), called_function.clone()),
+        ]);
+
+        project
+    }
+
+    #[test]
+    /// Checks if the nodes corresponding to the callee function are first in the worklist.
+    fn check_bottom_up_worklist() {
+        let project = mock_project();
+        let graph = crate::analysis::graph::get_program_cfg(&project.program);
+        let context = Context::new(&graph);
+        let comp = create_computation_with_bottom_up_worklist_order(context, Some(HashMap::new()));
+        // The last two nodes should belong to the callee
+        for node in comp.get_worklist()[6..].iter() {
+            match graph[*node] {
+                crate::analysis::graph::Node::BlkStart(_, sub)
+                | crate::analysis::graph::Node::BlkEnd(_, sub) => {
+                    assert_eq!(sub.tid, Tid::new("called_function"))
+                }
+                _ => panic!(),
+            }
+        }
+    }
+
+    #[test]
+    fn check_top_down_worklist() {
+        let project = mock_project();
+        let graph = crate::analysis::graph::get_program_cfg(&project.program);
+        let context = Context::new(&graph);
+        let comp = create_computation_with_top_down_worklist_order(context, Some(HashMap::new()));
+        // The first two nodes should belong to the callee
+        for node in comp.get_worklist()[..2].iter() {
+            match graph[*node] {
+                crate::analysis::graph::Node::BlkStart(_, sub)
+                | crate::analysis::graph::Node::BlkEnd(_, sub) => {
+                    assert_eq!(sub.tid, Tid::new("called_function"))
+                }
+                _ => panic!(),
+            }
+        }
+    }
+}
+*/

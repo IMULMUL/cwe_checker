@@ -10,6 +10,12 @@ pub type Bitvector = apint::ApInt;
 /// A trait to extend the bitvector type with useful helper functions
 /// that are not contained in the [`apint`] crate.
 pub trait BitvectorExtended: Sized {
+    /// Resize `self` to the target byte size by either zero extending or truncating `self`.
+    fn into_resize_unsigned(self, size: ByteSize) -> Self;
+
+    /// Resize `self` to the target byte size by either sign extending or truncating `self`.
+    fn into_resize_signed(self, size: ByteSize) -> Self;
+
     /// Perform a cast operation on the bitvector.
     /// Returns an error for non-implemented cast operations (currently all float-related casts).
     fn cast(&self, kind: CastOpType, width: ByteSize) -> Result<Self, Error>;
@@ -37,6 +43,9 @@ pub trait BitvectorExtended: Sized {
     /// Returns an error for bitvectors larger than 8 bytes,
     /// since multiplication for them is not yet implemented in the [`apint`] crate.
     fn signed_mult_with_overflow_flag(&self, rhs: &Self) -> Result<(Self, bool), Error>;
+
+    /// Return the size in bytes of the bitvector.
+    fn bytesize(&self) -> ByteSize;
 }
 
 impl BitvectorExtended for Bitvector {
@@ -49,9 +58,12 @@ impl BitvectorExtended for Bitvector {
             CastOpType::Int2Float | CastOpType::Float2Float | CastOpType::Trunc => {
                 Err(anyhow!("Float operations not yet implemented"))
             }
-            CastOpType::PopCount => Ok(Bitvector::from_u64(self.count_ones() as u64)
-                .into_truncate(width)
-                .unwrap()),
+            CastOpType::PopCount => {
+                Ok(Bitvector::from_u64(self.count_ones() as u64).into_resize_unsigned(width))
+            }
+            CastOpType::LzCount => {
+                Ok(Bitvector::from_u64(self.leading_zeros() as u64).into_resize_unsigned(width))
+            }
         }
     }
 
@@ -75,6 +87,7 @@ impl BitvectorExtended for Bitvector {
                 if self.is_zero() {
                     Ok(Bitvector::from_u8(1))
                 } else {
+                    assert_eq!(self, &Bitvector::from_u8(1)); // Any other value would indicate a bug.
                     Ok(Bitvector::from_u8(0))
                 }
             }
@@ -85,7 +98,8 @@ impl BitvectorExtended for Bitvector {
     }
 
     /// Perform a binary operation on the given bitvectors.
-    /// Returns an error for non-implemented operations (currently all float-related operations).
+    /// Returns an error for non-implemented operations (currently all float-related operations)
+    /// or for divisions-by-zero.
     fn bin_op(&self, op: BinOpType, rhs: &Self) -> Result<Self, Error> {
         use BinOpType::*;
         match op {
@@ -151,7 +165,7 @@ impl BitvectorExtended for Bitvector {
                 if self.width().to_usize() > 64 {
                     Err(anyhow!("Multiplication and division of integers larger than 8 bytes not yet implemented."))
                 } else {
-                    Ok(self.clone().into_checked_udiv(rhs).unwrap())
+                    Ok(self.clone().into_checked_udiv(rhs)?)
                 }
             }
             IntSDiv => {
@@ -159,11 +173,25 @@ impl BitvectorExtended for Bitvector {
                 if self.width().to_usize() > 64 {
                     Err(anyhow!("Multiplication and division of integers larger than 8 bytes not yet implemented."))
                 } else {
-                    Ok(self.clone().into_checked_sdiv(rhs).unwrap())
+                    Ok(self.clone().into_checked_sdiv(rhs)?)
                 }
             }
-            IntRem => Ok(self.clone().into_checked_urem(rhs).unwrap()),
-            IntSRem => Ok(self.clone().into_checked_srem(rhs).unwrap()),
+            IntRem => {
+                // FIXME: Division for bitvectors larger than 8 bytes is not yet implemented in the `apint` crate (version 0.2).
+                if self.width().to_usize() > 64 {
+                    Err(anyhow!("Multiplication and division of integers larger than 8 bytes not yet implemented."))
+                } else {
+                    Ok(self.clone().into_checked_urem(rhs)?)
+                }
+            }
+            IntSRem => {
+                // FIXME: Division for bitvectors larger than 8 bytes is not yet implemented in the `apint` crate (version 0.2).
+                if self.width().to_usize() > 64 {
+                    Err(anyhow!("Multiplication and division of integers larger than 8 bytes not yet implemented."))
+                } else {
+                    Ok(self.clone().into_checked_srem(rhs)?)
+                }
+            }
             IntLeft => {
                 let shift_amount = rhs.try_to_u64().unwrap() as usize;
                 if shift_amount < self.width().to_usize() {
@@ -259,6 +287,29 @@ impl BitvectorExtended for Bitvector {
             } else {
                 Ok((result, false))
             }
+        }
+    }
+
+    /// Return the size in bytes of the bitvector.
+    fn bytesize(&self) -> ByteSize {
+        self.width().into()
+    }
+
+    /// Resize `self` to the target byte size by either zero extending or truncating `self`.
+    fn into_resize_unsigned(self, size: ByteSize) -> Self {
+        if self.width() < size.into() {
+            self.into_zero_extend(size).unwrap()
+        } else {
+            self.into_truncate(size).unwrap()
+        }
+    }
+
+    /// Resize `self` to the target byte size by either sign extending or truncating `self`.
+    fn into_resize_signed(self, size: ByteSize) -> Self {
+        if self.width() < size.into() {
+            self.into_sign_extend(size).unwrap()
+        } else {
+            self.into_truncate(size).unwrap()
         }
     }
 }

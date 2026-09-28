@@ -1,19 +1,28 @@
 {
   "CWE78": {
     "system_symbols": [
-      "system",
-      "execl"
-    ],
-    "string_symbols": [
+      "system"
+    ]
+  },
+  "CWE134": {
+    "format_string_symbols": [
       "sprintf",
       "snprintf",
-      "strcat",
-      "strncat"
-    ],
-    "user_input_symbols": [
+      "printf",
       "scanf",
-      "__isoc99_scanf"
-    ]
+      "__isoc99_scanf",
+      "sscanf",
+      "__isoc99_sscanf"
+    ],
+    "format_string_index": {
+      "sprintf": 1,
+      "snprintf": 2,
+      "printf": 0,
+      "scanf": 0,
+      "__isoc99_scanf": 0,
+      "sscanf": 1,
+      "__isoc99_sscanf": 1
+    }
   },
   "CWE190": {
     "symbols": [
@@ -64,12 +73,163 @@
   "CWE248": {
     "symbols": []
   },
+  "CWE252": {
+    "_comment": "External symbols whose return value must be used.",
+    "_comment": "Every exported function that is annotated with warn_unused_result in glibc.",
+    "_comment": "Strict mode activates the check for symbols that even very mature projects ignore.",
+    "strict_mode": false,
+    "strict_symbols": [
+      "fileno",
+      "setpgid"
+    ],
+    "symbols": [
+      "__asprintf",
+      "__getdelim",
+      "__getrandom",
+      "__isoc23_fscanf",
+      "__isoc23_scanf",
+      "__isoc23_sscanf",
+      "__isoc23_vfscanf",
+      "__isoc23_vscanf",
+      "__isoc99_fscanf",
+      "__isoc99_scanf",
+      "__isoc99_sscanf",
+      "__isoc99_vfscanf",
+      "__isoc99_vscanf",
+      "access",
+      "arc4random_uniform",
+      "asprintf",
+      "atof",
+      "atoi",
+      "atol",
+      "atoll",
+      "brk",
+      "chdir",
+      "chown",
+      "chroot",
+      "confstr",
+      "daemon",
+      "dup",
+      "faccessat",
+      "fchdir",
+      "fchmodat",
+      "fchown",
+      "fchownat",
+      "feof",
+      "feof_unlocked",
+      "ferror_unlocked",
+      "fgets",
+      "fgets_unlocked",
+      "fgetws",
+      "fgetws_unlocked",
+      "fileno_unlocked",
+      "fputc",
+      "fread",
+      "fread_unlocked",
+      "fscanf",
+      "ftell",
+      "ftello",
+      "ftello64",
+      "ftruncate",
+      "ftruncate64",
+      "ftrylockfile",
+      "getdelim",
+      "getdomainname",
+      "getentropy",
+      "getgroups",
+      "getline",
+      "getrandom",
+      "gets",
+      "getsubopt",
+      "lchown",
+      "link",
+      "linkat",
+      "lockf",
+      "lockf64",
+      "mkostemp",
+      "mkostemp64",
+      "mkostemps",
+      "mkostemps64",
+      "mkstemp",
+      "mkstemps",
+      "mkstemps64",
+      "mmap",
+      "nice",
+      "pipe",
+      "pipe2",
+      "posix_memalign",
+      "posix_openpt",
+      "prctl",
+      "pread",
+      "preadv",
+      "preadv2",
+      "preadv64",
+      "preadv64v2",
+      "pthread_cond_timedwait",
+      "pthread_cond_wait",
+      "pthread_mutex_lock",
+      "pthread_mutex_trylock",
+      "pthread_spin_lock",
+      "pthread_spin_trylock",
+      "pwritev",
+      "pwritev2",
+      "pwritev64v2",
+      "read",
+      "readlink",
+      "readlinkat",
+      "readv",
+      "revoke",
+      "rpmatch",
+      "setdomainname",
+      "setegid",
+      "seteuid",
+      "setgid",
+      "sethostid",
+      "sethostname",
+      "setregid",
+      "setresgid",
+      "setresuid",
+      "setreuid",
+      "setrlimit",
+      "setsid",
+      "setuid",
+      "sscanf",
+      "stat",
+      "strtod",
+      "strtof",
+      "strtol",
+      "strtold",
+      "strtoll",
+      "strtoul",
+      "strtoull",
+      "symlink",
+      "symlinkat",
+      "system",
+      "truncate",
+      "truncate64",
+      "ttyname_r",
+      "vasprintf",
+      "vfscanf",
+      "vscanf",
+      "wcrtomb",
+      "write",
+      "writev"
+    ]
+  },
   "CWE332": {
     "pairs": [
       [
         "srand",
         "rand"
       ]
+    ]
+  },
+  "CWE337": {
+    "sources": [
+      "time"
+    ],
+    "seeding_functions": [
+      "srand"
     ]
   },
   "CWE367": {
@@ -79,6 +239,16 @@
         "open"
       ]
     ]
+  },
+  "CWE416": {
+    "deallocation_symbols": [
+      "free",
+      "realloc",
+      "reallocarray",
+      "operator.delete",
+      "operator.delete[]"
+    ],
+    "always_include_full_path_to_free_site": true
   },
   "CWE426": {
     "_comment": "functions that change/drop privileges",
@@ -205,6 +375,16 @@
   "CWE782": {
     "symbols": []
   },
+  "CWE789": {
+    "stack_threshold": 7500,
+    "heap_threshold": 1000000,
+    "symbols": [
+      "xmalloc",
+      "malloc",
+      "realloc",
+      "calloc"
+    ]
+  },
   "check_path": {
     "_comment": "functions that take direct user input",
     "symbols": [
@@ -218,10 +398,38 @@
       "malloc",
       "calloc",
       "realloc",
-      "xmalloc"
-    ],
-    "deallocation_symbols": [
-      "free"
+      "reallocarray",
+      "xmalloc",
+      "strdup",
+      "operator.new",
+      "operator.new[]"
     ]
+  },
+  "StringAbstraction": {
+    "string_symbols": [
+      "sprintf",
+      "snprintf",
+      "vsprintf",
+      "vsnprintf",
+      "strcat",
+      "strncat",
+      "scanf",
+      "__isoc99_scanf",
+      "sscanf",
+      "__isoc99_sscanf",
+      "memcpy",
+      "free"
+    ],
+    "format_string_index": {
+      "printf": 0,
+      "sprintf": 1,
+      "snprintf": 2,
+      "vsprintf": 1,
+      "vsnprintf": 2,
+      "scanf": 0,
+      "__isoc99_scanf": 0,
+      "sscanf": 1,
+      "__isoc99_sscanf": 1
+    }
   }
 }

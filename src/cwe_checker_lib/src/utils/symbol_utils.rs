@@ -1,16 +1,19 @@
 //! Helper functions for common tasks utilizing extern symbols,
 //! e.g. searching for calls to a specific extern symbol.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::intermediate_representation::*;
 
 /// Find the extern symbol object for a symbol name and return the symbol tid and name.
 pub fn find_symbol<'a>(prog: &'a Term<Program>, name: &str) -> Option<(&'a Tid, &'a str)> {
     let mut symbol: Option<(&'a Tid, &'a str)> = None;
-    prog.term.extern_symbols.iter().for_each(|sym| {
+    prog.term.extern_symbols.iter().find(|(_tid, sym)| {
         if name == sym.name {
             symbol = Some((&sym.tid, &sym.name));
+            true
+        } else {
+            false
         }
     });
 
@@ -30,11 +33,7 @@ pub fn get_calls_to_symbols<'a, 'b>(
         for jmp in blk.term.jmps.iter() {
             if let Jmp::Call { target: dst, .. } = &jmp.term {
                 if symbols.contains_key(dst) {
-                    calls.push((
-                        sub.term.name.as_str(),
-                        &jmp.tid,
-                        symbols.get(dst).clone().unwrap(),
-                    ));
+                    calls.push((sub.term.name.as_str(), &jmp.tid, symbols.get(dst).unwrap()));
                 }
             }
         }
@@ -43,30 +42,63 @@ pub fn get_calls_to_symbols<'a, 'b>(
 }
 
 /// Get a map from TIDs to the corresponding extern symbol struct.
-/// Only symbols with names contained in `symbols_to_find` are contained in the map.
+///
+/// Only symbols with names contained in `symbols_to_find` are contained in the
+/// map.
+///
+/// This is O(|symbols_to_find| x |extern_symbols|), prefer
+/// [`get_symbol_map_fast`] if speed matters.
 pub fn get_symbol_map<'a>(
     project: &'a Project,
     symbols_to_find: &[String],
 ) -> HashMap<Tid, &'a ExternSymbol> {
     let mut tid_map = HashMap::new();
     for symbol_name in symbols_to_find {
-        if let Some((tid, symbol)) = project
-            .program
-            .term
-            .extern_symbols
-            .iter()
-            .find_map(|symbol| {
-                if symbol.name == *symbol_name {
-                    Some((symbol.tid.clone(), symbol))
-                } else {
-                    None
-                }
-            })
+        if let Some((tid, symbol)) =
+            project
+                .program
+                .term
+                .extern_symbols
+                .iter()
+                .find_map(|(_tid, symbol)| {
+                    if symbol.name == *symbol_name {
+                        Some((symbol.tid.clone(), symbol))
+                    } else {
+                        None
+                    }
+                })
         {
             tid_map.insert(tid, symbol);
         }
     }
     tid_map
+}
+
+/// Get a map from TIDs to the corresponding extern symbol struct.
+///
+/// Only symbols with names contained in `symbols_to_find` are contained in the
+/// map.
+///
+/// More efficient than [`get_symbol_map`], prefer this if `symbols_to_find` is
+/// huge since this is O(|extern_symbols|) and not
+/// O(|symbols_to_find|x|extern_symbols|).
+pub fn get_symbol_map_fast<'a>(
+    project: &'a Project,
+    symbols_to_find: &HashSet<String>,
+) -> HashMap<Tid, &'a ExternSymbol> {
+    project
+        .program
+        .term
+        .extern_symbols
+        .iter()
+        .filter_map(|(_tid, symbol)| {
+            if symbols_to_find.contains(&symbol.name) {
+                Some((symbol.tid.clone(), symbol))
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Find calls to TIDs contained as keys in the given symbol map.

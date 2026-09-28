@@ -1,12 +1,14 @@
 [package]
 name = "cwe_checker"
-version = "0.5.0-dev"
-authors = ["Enkelmann <nils-edvin.enkelmann@fkie.fraunhofer.de>"]
-edition = "2018"
+version = "0.9.0"
+authors = ["Fraunhofer FKIE <contact@cwe-checker.io>"]
+edition = "2021"
+rust-version = "1.82"
 
 [dependencies]
-structopt = "0.3"
+clap = { version = "4.0.32", features = ["derive"] }
 cwe_checker_lib = { path = "../cwe_checker_lib" }
+serde = {version = "1.0", features = ["derive", "rc"]}
 serde_json = "1.0"
-directories = "3.0"
-nix = "0.19.1"
+directories = "5.0.1"
+anyhow = "1.0"

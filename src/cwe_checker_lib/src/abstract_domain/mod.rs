@@ -5,30 +5,73 @@ use crate::intermediate_representation::*;
 use crate::prelude::*;
 
 mod bitvector;
-pub use bitvector::*;
+pub use bitvector::BitvectorDomain;
 
 mod identifier;
 pub use identifier::*;
 
-mod pointer;
-pub use pointer::*;
-
 mod data;
-pub use data::*;
+pub use data::DataDomain;
 
 mod mem_region;
-pub use mem_region::*;
+pub use mem_region::MemRegion;
 
 mod interval;
-pub use interval::*;
+pub use interval::{Interval, IntervalDomain};
+
+mod bricks;
+pub use bricks::{BrickDomain, BricksDomain};
+
+mod character_inclusion;
+pub use character_inclusion::{CharacterInclusionDomain, CharacterSet};
+
+mod strings;
+pub use strings::*;
+
+mod domain_map;
+pub use domain_map::*;
+
+/// Marker trait to communicate that the implementing type is "cheap" to
+/// [`Clone.`].
+///
+/// Here "cheap" means something like:
+/// - copy only a few cache lines
+/// - maybe increase a refcount
+/// - no allocations
+// Ultimately we want to introduce a trait bound on the context traits to
+// require that the abstract domains are cheap to clone.
+pub trait CheapToClone {}
 
 /// The main trait describing an abstract domain.
 ///
 /// Each abstract domain is partially ordered.
 /// Abstract domains of the same type can be merged.
 pub trait AbstractDomain: Sized + Eq + Clone {
-    /// Return an upper bound (with respect to the partial order on the domain) for the two inputs `self` and `other`.
+    /// Returns an upper bound (with respect to the partial order on the domain)
+    /// for the two inputs `self` and `other`.
+    #[must_use]
     fn merge(&self, other: &Self) -> Self;
+
+    /// Returns an upper bound (with respect to the partial order on the domain)
+    /// for the two inputs `self` and `other`.
+    ///
+    /// Modifies `self` in-place to hold the result. This can be useful in
+    /// situations where it is not necessary to create a new object and more
+    /// efficient to modify an existing one in-place.
+    ///
+    /// # Default
+    ///
+    /// Calls [`AbstractDomain::merge`] on the inputs and overwrites `self` with
+    /// the result. Does nothing when `self` is equal to `other`.
+    fn merge_with(&mut self, other: &Self) -> &mut Self {
+        if self != other {
+            let new_value = self.merge(other);
+
+            *self = new_value;
+        }
+
+        self
+    }
 
     /// Returns whether the element represents the top element (i.e. maximal with respect to the partial order) or not.
     /// If a domain has no maximal element, this function should always return false.
@@ -66,15 +109,19 @@ pub trait HasTop {
 /// It has a *Top* element, which is only characterized by its bytesize.
 pub trait RegisterDomain: AbstractDomain + SizedDomain + HasTop {
     /// Compute the (abstract) result of a binary operation
+    #[must_use]
     fn bin_op(&self, op: BinOpType, rhs: &Self) -> Self;
 
     /// Compute the (abstract) result of a unary operation
+    #[must_use]
     fn un_op(&self, op: UnOpType) -> Self;
 
     /// Extract a sub-bitvector
+    #[must_use]
     fn subpiece(&self, low_byte: ByteSize, size: ByteSize) -> Self;
 
     /// Perform a typecast to extend a bitvector or to cast between integer and floating point types.
+    #[must_use]
     fn cast(&self, kind: CastOpType, width: ByteSize) -> Self;
 
     /// Return the bytesize of the result of the given binary operation.
@@ -115,7 +162,7 @@ pub trait TryToInterval {
     fn try_to_interval(&self) -> Result<Interval, Error>;
 
     /// If `self` represents an interval of absolute values (or can be widened to represent such an interval)
-    /// then return it as an interval of signed integers if the interval is bounded.
+    /// then return it as an interval of signed integers of the form `(start, end)` if the interval is bounded.
     /// Else return an error.
     /// Note that the conversion loses information about the bytesize of the values contained in the interval.
     fn try_to_offset_interval(&self) -> Result<(i64, i64), Error> {
@@ -153,4 +200,12 @@ pub trait SpecializeByConditional: Sized {
     /// Return the restriction of `self` to values satisfying `self != bound`
     /// Returns an error if `self` only represents one value for which `self == bound` holds.
     fn add_not_equal_bound(self, bound: &Bitvector) -> Result<Self, Error>;
+
+    /// Return the intersection of two values or an error if the intersection is empty.
+    fn intersect(self, other: &Self) -> Result<Self, Error>;
+
+    /// Remove all widening hints from `self`.
+    /// Necessary for cases where several sources have widening hints,
+    /// but only one source should contribute widening hints to the result.
+    fn without_widening_hints(self) -> Self;
 }

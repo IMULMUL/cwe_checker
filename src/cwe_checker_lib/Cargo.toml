@@ -1,21 +1,34 @@
 [package]
 name = "cwe_checker_lib"
-version = "0.5.0-dev"
-authors = ["Nils-Edvin Enkelmann <nils-edvin.enkelmann@fkie.fraunhofer.de>"]
-edition = "2018"
+version = "0.9.0"
+authors = ["Fraunhofer FKIE <contact@cwe-checker.io>"]
+edition = "2021"
+rust-version = "1.82"
 
 [dependencies]
 apint = "0.2"
+regex = "1.5.5"
 serde = {version = "1.0", features = ["derive", "rc"]}
 serde_json = "1.0"
-serde_yaml = "0.8"
-petgraph = { version = "0.5", features = ["default", "serde-1"] }
+serde_yaml = "0.9"
+petgraph = { version = "0.6", features = ["default", "serde-1"] }
 fnv = "1.0" # a faster hash function for small keys like integers
 anyhow = "1.0" # for easy error types
-crossbeam-channel = "0.4"
+crossbeam-channel = "0.5.4"
 derive_more = "0.99"
-directories = "3.0"
-goblin = "0.2"
+directories = "5.0.1"
+goblin = "0.7.1"
+itertools = "0.10.3"
+gcd = "2.1.0"
+nix = "0.26.1"
+
+[dev-dependencies]
+criterion = { version = "0.5.1", features = ["html_reports"] }
+paste = "1.0.14"
+
+[[bench]]
+name = "benchmarks"
+harness = false
 
 [lib]
 name = "cwe_checker_lib"

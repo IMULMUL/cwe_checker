@@ -1,14 +1,30 @@
+use crate::bitvec;
+
 use super::*;
 
 impl IntervalDomain {
     /// Return a new interval domain of 8-byte integers.
     pub fn mock(start: i64, end: i64) -> IntervalDomain {
-        IntervalDomain::new(Bitvector::from_i64(start), Bitvector::from_i64(end))
+        IntervalDomain::new(
+            bitvec!(format!("{}:8", start)),
+            bitvec!(format!("{}:8", end)),
+        )
     }
 
     /// Return a new interval domain of 1-byte integers.
     pub fn mock_i8(start: i8, end: i8) -> IntervalDomain {
-        IntervalDomain::new(Bitvector::from_i8(start), Bitvector::from_i8(end))
+        IntervalDomain::new(
+            bitvec!(format!("{}:1", start)),
+            bitvec!(format!("{}:1", end)),
+        )
+    }
+
+    /// Return a new interval domain of 4-byte integers.
+    pub fn mock_i32(start: i32, end: i32) -> IntervalDomain {
+        IntervalDomain::new(
+            bitvec!(format!("{}:4", start)),
+            bitvec!(format!("{}:4", end)),
+        )
     }
 
     pub fn mock_with_bounds(
@@ -18,8 +34,8 @@ impl IntervalDomain {
         upper_bound: Option<i64>,
     ) -> IntervalDomain {
         let mut domain = IntervalDomain::mock(start, end);
-        domain.update_widening_lower_bound(&lower_bound.map(|b| Bitvector::from_i64(b)));
-        domain.update_widening_upper_bound(&upper_bound.map(|b| Bitvector::from_i64(b)));
+        domain.update_widening_lower_bound(&lower_bound.map(|b| bitvec!(format!("{}:8", b))));
+        domain.update_widening_upper_bound(&upper_bound.map(|b| bitvec!(format!("{}:8", b))));
         domain
     }
 
@@ -30,15 +46,25 @@ impl IntervalDomain {
         upper_bound: Option<i8>,
     ) -> IntervalDomain {
         let mut domain = IntervalDomain::mock_i8(start, end);
-        domain.update_widening_lower_bound(&lower_bound.map(|b| Bitvector::from_i8(b)));
-        domain.update_widening_upper_bound(&upper_bound.map(|b| Bitvector::from_i8(b)));
+        domain.update_widening_lower_bound(&lower_bound.map(|b| bitvec!(format!("{}:1", b))));
+        domain.update_widening_upper_bound(&upper_bound.map(|b| bitvec!(format!("{}:1", b))));
         domain
     }
 
     /// Set the widening delay to the interval length
     /// to simulate that `self` was just widened.
     pub fn as_freshly_widened(mut self) -> Self {
-        self.widening_delay = self.interval.length().try_to_u64().unwrap();
+        self.widening_delay = (self.interval.end.clone() - &self.interval.start)
+            .try_to_u64()
+            .unwrap();
+        self
+    }
+
+    /// Set the stride of the interval.
+    /// also rounds down the interval end to be contained in the same residue class as the interval start.
+    pub fn with_stride(mut self, stride: u64) -> Self {
+        self.interval.stride = stride;
+        self.interval.adjust_end_to_value_in_stride();
         self
     }
 }
@@ -62,7 +88,7 @@ fn signed_merge() {
     let b = IntervalDomain::mock_with_bounds(None, 3, 3, Some(5));
     assert_eq!(
         a.merge(&b),
-        IntervalDomain::mock_with_bounds(None, -3, 5, None).as_freshly_widened()
+        IntervalDomain::mock_with_bounds(Some(-3), 1, 3, Some(5)).with_stride(2)
     );
     let a = IntervalDomain::mock_with_bounds(None, 1, 5, None);
     let b = IntervalDomain::mock_with_bounds(None, -1, -1, Some(5));
@@ -110,7 +136,7 @@ fn signed_merge() {
     let update = IntervalDomain::mock_with_bounds(Some(-3), -2, 3, None);
     var = var.merge(&update);
     let mut expected_result = IntervalDomain::mock_with_bounds(None, -3, 3, None);
-    expected_result.widening_delay = 6;
+    expected_result.widening_delay = 5; // The last update does not cause widening
     assert_eq!(var, expected_result);
 }
 
@@ -187,7 +213,7 @@ fn subpiece() {
     let subpieced_val = val.subpiece(ByteSize::new(0), ByteSize::new(1));
     assert_eq!(
         subpieced_val,
-        IntervalDomain::mock_i8_with_bounds(None, -3, 5, None)
+        IntervalDomain::mock_i8_with_bounds(None, -3, 5, Some(10))
     );
     let val = IntervalDomain::mock_with_bounds(Some(-30), 2, 5, Some(10));
     let subpieced_val = val.subpiece(ByteSize::new(0), ByteSize::new(1));
@@ -199,20 +225,64 @@ fn subpiece() {
     let subpieced_val = val.subpiece(ByteSize::new(0), ByteSize::new(1));
     assert_eq!(
         subpieced_val,
-        IntervalDomain::mock_i8_with_bounds(None, 2, 5, None)
+        IntervalDomain::mock_i8_with_bounds(None, 2, 5, Some(10))
     );
     let val = IntervalDomain::mock_with_bounds(Some(-30), 2, 567, Some(777));
     let subpieced_val = val.subpiece(ByteSize::new(0), ByteSize::new(1));
     assert_eq!(subpieced_val, IntervalDomain::new_top(ByteSize::new(1)));
-    let val = IntervalDomain::mock_with_bounds(Some(-30), 2, 3, Some(777));
-    let subpieced_val = val.subpiece(ByteSize::new(1), ByteSize::new(1));
-    assert_eq!(subpieced_val, IntervalDomain::new_top(ByteSize::new(1)));
-    let val = IntervalDomain::mock_with_bounds(Some(-30), 512, 512, Some(777));
+    let val = IntervalDomain::mock_with_bounds(Some(-30), 2, 3, Some(1024));
     let subpieced_val = val.subpiece(ByteSize::new(1), ByteSize::new(1));
     assert_eq!(
         subpieced_val,
-        IntervalDomain::mock_i8_with_bounds(None, 2, 2, None)
+        IntervalDomain::mock_i8_with_bounds(Some(-1), 0, 0, Some(4))
     );
+    let val = IntervalDomain::mock_with_bounds(Some(-30), 512, 512, Some(1025));
+    let subpieced_val = val.subpiece(ByteSize::new(1), ByteSize::new(1));
+    assert_eq!(
+        subpieced_val,
+        IntervalDomain::mock_i8_with_bounds(Some(-1), 2, 2, Some(4))
+    );
+    let val = IntervalDomain::mock_with_bounds(Some(-30), 120, 130, Some(1024));
+    let subpieced_val = val.subpiece(ByteSize::new(0), ByteSize::new(1));
+    assert_eq!(subpieced_val, IntervalDomain::new_top(ByteSize::new(1)));
+    let val = IntervalDomain::mock_with_bounds(Some(-30), 250, 260, Some(1024));
+    let subpieced_val = val.subpiece(ByteSize::new(0), ByteSize::new(1));
+    assert_eq!(subpieced_val, IntervalDomain::mock_i8(-6, 4));
+    let val = IntervalDomain::mock_with_bounds(Some(110), 376, 376, Some(390));
+    let subpieced_val = val.subpiece(ByteSize::new(0), ByteSize::new(1));
+    assert_eq!(
+        subpieced_val,
+        IntervalDomain::mock_i8_with_bounds(None, 120, 120, None)
+    );
+}
+
+#[test]
+fn piece() {
+    let higher_half = IntervalDomain::mock_i8_with_bounds(None, 0, 0, None);
+    let lower_half = IntervalDomain::mock_i8_with_bounds(Some(0), 3, 5, Some(10));
+    let result = higher_half.piece(&lower_half).sign_extend(ByteSize::new(8));
+    assert_eq!(
+        result,
+        IntervalDomain::mock_with_bounds(Some(0), 3, 5, Some(10))
+    );
+    let higher_half = IntervalDomain::mock_i8_with_bounds(None, 0, 0, None);
+    let lower_half = IntervalDomain::mock_i8_with_bounds(Some(-1), 3, 5, Some(10));
+    let result = higher_half.piece(&lower_half).sign_extend(ByteSize::new(8));
+    assert_eq!(
+        result,
+        IntervalDomain::mock_with_bounds(None, 3, 5, Some(10))
+    );
+    let higher_half = IntervalDomain::mock_i8_with_bounds(Some(-30), 1, 2, Some(30));
+    let lower_half = IntervalDomain::mock_i8_with_bounds(Some(0), 3, 5, Some(10));
+    let result = higher_half.piece(&lower_half).sign_extend(ByteSize::new(8));
+    assert_eq!(
+        result,
+        IntervalDomain::mock_with_bounds(None, 259, 517, None)
+    );
+    let higher_half = IntervalDomain::mock_i8_with_bounds(None, 0, 1, None);
+    let lower_half = IntervalDomain::mock_i8_with_bounds(Some(-10), -5, 5, Some(10));
+    let result = higher_half.piece(&lower_half).sign_extend(ByteSize::new(8));
+    assert_eq!(result, IntervalDomain::mock_with_bounds(None, 0, 511, None));
 }
 
 #[test]
@@ -337,11 +407,11 @@ fn shift_left() {
 #[test]
 fn simple_interval_contains() {
     let domain = IntervalDomain::mock(-10, 5);
-    assert!(!domain.interval.contains(&Bitvector::from_i64(-11)));
-    assert!(domain.interval.contains(&Bitvector::from_i64(-10)));
-    assert!(domain.interval.contains(&Bitvector::from_i64(-4)));
-    assert!(domain.interval.contains(&Bitvector::from_i64(5)));
-    assert!(!domain.interval.contains(&Bitvector::from_i64(6)));
+    assert!(!domain.interval.contains(&bitvec!("-11:8")));
+    assert!(domain.interval.contains(&bitvec!("-10:8")));
+    assert!(domain.interval.contains(&bitvec!("-4:8")));
+    assert!(domain.interval.contains(&bitvec!("5:8")));
+    assert!(!domain.interval.contains(&bitvec!("6:8")));
 }
 
 #[test]
@@ -351,42 +421,58 @@ fn add_signed_bounds() {
     // signed_less_equal
     let x = interval
         .clone()
-        .add_signed_less_equal_bound(&Bitvector::from_i64(20));
+        .add_signed_less_equal_bound(&bitvec!("20:8"));
     assert_eq!(
         x.unwrap(),
         IntervalDomain::mock_with_bounds(Some(-100), -10, 10, Some(20))
     );
     let x = interval
         .clone()
-        .add_signed_less_equal_bound(&Bitvector::from_i64(-5));
+        .add_signed_less_equal_bound(&bitvec!("-5:8"));
     assert_eq!(
         x.unwrap(),
         IntervalDomain::mock_with_bounds(Some(-100), -10, -5, None)
     );
     let x = interval
         .clone()
-        .add_signed_less_equal_bound(&Bitvector::from_i64(-20));
+        .add_signed_less_equal_bound(&bitvec!("-20:8"));
     assert!(x.is_err());
+    let x = IntervalDomain::mock(0, 10)
+        .with_stride(10)
+        .add_signed_less_equal_bound(&bitvec!("15:8"));
+    assert_eq!(x.unwrap(), IntervalDomain::mock(0, 10).with_stride(10));
+    let x = IntervalDomain::mock(0, 10)
+        .with_stride(10)
+        .add_signed_less_equal_bound(&bitvec!("5:8"));
+    assert_eq!(x.unwrap(), IntervalDomain::mock(0, 0));
 
     //signed_greater_equal
     let x = interval
         .clone()
-        .add_signed_greater_equal_bound(&Bitvector::from_i64(20));
+        .add_signed_greater_equal_bound(&bitvec!("20:8"));
     assert!(x.is_err());
     let x = interval
         .clone()
-        .add_signed_greater_equal_bound(&Bitvector::from_i64(-5));
+        .add_signed_greater_equal_bound(&bitvec!("-5:8"));
     assert_eq!(
         x.unwrap(),
         IntervalDomain::mock_with_bounds(None, -5, 10, Some(100))
     );
     let x = interval
         .clone()
-        .add_signed_greater_equal_bound(&Bitvector::from_i64(-20));
+        .add_signed_greater_equal_bound(&bitvec!("-20:8"));
     assert_eq!(
         x.unwrap(),
         IntervalDomain::mock_with_bounds(Some(-20), -10, 10, Some(100))
     );
+    let x = IntervalDomain::mock(0, 10)
+        .with_stride(10)
+        .add_signed_greater_equal_bound(&bitvec!("-5:8"));
+    assert_eq!(x.unwrap(), IntervalDomain::mock(0, 10).with_stride(10));
+    let x = IntervalDomain::mock(0, 10)
+        .with_stride(10)
+        .add_signed_greater_equal_bound(&bitvec!("5:8"));
+    assert_eq!(x.unwrap(), IntervalDomain::mock(10, 10));
 }
 
 #[test]
@@ -398,67 +484,67 @@ fn add_unsigned_bounds() {
     // unsigned_less_equal
     let x = positive_interval
         .clone()
-        .add_unsigned_less_equal_bound(&Bitvector::from_i64(35));
+        .add_unsigned_less_equal_bound(&bitvec!("35:8"));
     assert_eq!(
         x.unwrap(),
         IntervalDomain::mock_with_bounds(Some(10), 20, 30, Some(35))
     );
     let x = positive_interval
         .clone()
-        .add_unsigned_less_equal_bound(&Bitvector::from_i64(15));
+        .add_unsigned_less_equal_bound(&bitvec!("15:8"));
     assert!(x.is_err());
 
     let x = wrapped_interval
         .clone()
-        .add_unsigned_less_equal_bound(&Bitvector::from_i64(35));
+        .add_unsigned_less_equal_bound(&bitvec!("35:8"));
     assert_eq!(
         x.unwrap(),
         IntervalDomain::mock_with_bounds(None, 0, 10, Some(35))
     );
     let x = wrapped_interval
         .clone()
-        .add_unsigned_less_equal_bound(&Bitvector::from_i64(-5));
+        .add_unsigned_less_equal_bound(&bitvec!("-5:8"));
     assert_eq!(x.unwrap(), wrapped_interval); // Cannot remove a subinterval from the domain
 
     let x = negative_interval
         .clone()
-        .add_unsigned_less_equal_bound(&Bitvector::from_i64(-25));
+        .add_unsigned_less_equal_bound(&bitvec!("-25:8"));
     assert_eq!(
         x.unwrap(),
         IntervalDomain::mock_with_bounds(Some(-40), -30, -25, None)
     );
     let x = negative_interval
         .clone()
-        .add_unsigned_less_equal_bound(&Bitvector::from_i64(-35));
+        .add_unsigned_less_equal_bound(&bitvec!("-35:8"));
     assert!(x.is_err());
 
     // unsigned_greater_equal
     let x = positive_interval
         .clone()
-        .add_unsigned_greater_equal_bound(&Bitvector::from_i64(25));
+        .add_unsigned_greater_equal_bound(&bitvec!("25:8"));
     assert_eq!(
         x.unwrap(),
         IntervalDomain::mock_with_bounds(None, 25, 30, Some(40))
     );
     let x = positive_interval
         .clone()
-        .add_unsigned_greater_equal_bound(&Bitvector::from_i64(35));
+        .add_unsigned_greater_equal_bound(&bitvec!("35:8"));
     assert!(x.is_err());
 
     let x = wrapped_interval
         .clone()
-        .add_unsigned_greater_equal_bound(&Bitvector::from_i64(5));
+        .add_unsigned_greater_equal_bound(&bitvec!("5:8"));
     assert_eq!(x.unwrap(), wrapped_interval);
     let x = wrapped_interval
         .clone()
-        .add_unsigned_greater_equal_bound(&Bitvector::from_i64(35));
+        .add_unsigned_greater_equal_bound(&bitvec!("35:8"));
     assert_eq!(
         x.unwrap(),
         IntervalDomain::mock_with_bounds(Some(-100), -10, -1, None)
     );
     let x = wrapped_interval
         .clone()
-        .add_unsigned_greater_equal_bound(&Bitvector::from_i64(-50));
+        .add_unsigned_greater_equal_bound(&bitvec!("-50:8"));
     assert_eq!(
         x.unwrap(),
         IntervalDomain::mock_with_bounds(Some(-50), -10, -1, None)
@@ -466,11 +552,11 @@ fn add_unsigned_bounds() {
 
     let x = negative_interval
         .clone()
-        .add_unsigned_greater_equal_bound(&Bitvector::from_i64(25));
+        .add_unsigned_greater_equal_bound(&bitvec!("25:8"));
     assert_eq!(x.unwrap(), negative_interval);
     let x = negative_interval
         .clone()
-        .add_unsigned_greater_equal_bound(&Bitvector::from_i64(-25));
+        .add_unsigned_greater_equal_bound(&bitvec!("-25:8"));
     assert_eq!(
         x.unwrap(),
         IntervalDomain::mock_with_bounds(None, -25, -20, Some(-10))
@@ -481,36 +567,28 @@ fn add_unsigned_bounds() {
 fn add_not_equal_bounds() {
     let interval = IntervalDomain::mock_with_bounds(None, -10, 10, None);
 
-    let x = interval
-        .clone()
-        .add_not_equal_bound(&Bitvector::from_i64(-20));
+    let x = interval.clone().add_not_equal_bound(&bitvec!("-20:8"));
     assert_eq!(
         x.unwrap(),
         IntervalDomain::mock_with_bounds(Some(-19), -10, 10, None)
     );
-    let x = interval
-        .clone()
-        .add_not_equal_bound(&Bitvector::from_i64(-0));
+    let x = interval.clone().add_not_equal_bound(&bitvec!("0:8"));
     assert_eq!(x.unwrap(), interval);
-    let x = interval
-        .clone()
-        .add_not_equal_bound(&Bitvector::from_i64(20));
+    let x = interval.clone().add_not_equal_bound(&bitvec!("20:8"));
     assert_eq!(
         x.unwrap(),
         IntervalDomain::mock_with_bounds(None, -10, 10, Some(19))
     );
 
     let interval = IntervalDomain::mock(5, 5);
-    let x = interval
-        .clone()
-        .add_not_equal_bound(&Bitvector::from_i64(5));
+    let x = interval.clone().add_not_equal_bound(&bitvec!("5:8"));
     assert!(x.is_err());
     let interval = IntervalDomain::mock(5, 6);
-    let x = interval.add_not_equal_bound(&Bitvector::from_i64(5));
+    let x = interval.add_not_equal_bound(&bitvec!("5:8"));
     assert_eq!(x.unwrap(), IntervalDomain::mock(6, 6));
 
     let interval = IntervalDomain::mock_with_bounds(None, 5, 6, Some(100));
-    let x = interval.add_not_equal_bound(&Bitvector::from_i64(10));
+    let x = interval.add_not_equal_bound(&bitvec!("10:8"));
     assert_eq!(
         x.unwrap(),
         IntervalDomain::mock_with_bounds(None, 5, 6, Some(9))
@@ -521,7 +599,7 @@ fn add_not_equal_bounds() {
 fn intersection() {
     let interval1 = IntervalDomain::mock_with_bounds(Some(-100), -10, 10, Some(100));
     let interval2 = IntervalDomain::mock_with_bounds(Some(-20), 2, 30, None);
-    let intersection = interval1.intersect(&interval2).unwrap();
+    let intersection = interval1.clone().intersect(&interval2).unwrap();
     assert_eq!(
         intersection,
         IntervalDomain::mock_with_bounds(Some(-20), 2, 10, Some(100))
@@ -543,4 +621,54 @@ fn float_nan_bytesize() {
     let result = top_value.un_op(UnOpType::FloatNaN);
     assert!(result.is_top());
     assert_eq!(result.bytesize(), ByteSize::new(1));
+}
+
+#[test]
+fn stride_rounding() {
+    let interval = Interval::mock(3, 13).with_stride(10);
+    assert_eq!(
+        bitvec!("5:8").round_up_to_stride_of(&interval).unwrap(),
+        bitvec!("13:8")
+    );
+    assert_eq!(
+        bitvec!("5:8").round_down_to_stride_of(&interval).unwrap(),
+        bitvec!("3:8")
+    );
+    assert_eq!(
+        bitvec!("-277:8").round_up_to_stride_of(&interval).unwrap(),
+        bitvec!("-277:8")
+    );
+    assert_eq!(
+        bitvec!("-277:8")
+            .round_down_to_stride_of(&interval)
+            .unwrap(),
+        bitvec!("-277:8")
+    );
+
+    let interval = Interval::mock_i8(100, 110).with_stride(10);
+    assert_eq!(
+        bitvec!("-123:1").round_up_to_stride_of(&interval).unwrap(),
+        bitvec!("-120:1")
+    );
+    assert_eq!(bitvec!("-123:1").round_down_to_stride_of(&interval), None);
+}
+
+#[test]
+fn lzcount_op() {
+    use super::RegisterDomain;
+    // Test exact computation
+    let interval: IntervalDomain = Interval::mock_i8(3, 3).into();
+    let result = interval.cast(CastOpType::LzCount, ByteSize::new(2));
+    assert_eq!(result, bitvec!("0x6:2").into()); // leading 6 bits of the 8-bit value are zeroes
+
+    // Test result for non-exact interval
+    let interval: IntervalDomain = Interval::mock(3, 53).with_stride(5).into();
+    let result = interval.cast(CastOpType::LzCount, ByteSize::new(8));
+    assert_eq!(result, Interval::mock(58, 62).into());
+    let interval: IntervalDomain = Interval::mock(-1, 1).into();
+    let result = interval.cast(CastOpType::LzCount, ByteSize::new(8));
+    assert_eq!(result, Interval::mock(0, 64).into());
+    let interval: IntervalDomain = Interval::mock(-10, -4).into();
+    let result = interval.cast(CastOpType::LzCount, ByteSize::new(8));
+    assert_eq!(result, Interval::mock(0, 0).into());
 }
